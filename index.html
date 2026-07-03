@@ -415,7 +415,13 @@ Environment="OLLAMA_ORIGINS=https://mini486ok.github.io"</code></pre>
           <p class="modal-note">특정 오리진만 허용하는 위 방식을 권장합니다. <code>"*"</code>는 모든 웹사이트가 로컬 Ollama에 접근할 수 있게 되므로 편의용으로만 쓰세요.
           설정 후 <b>Ollama를 완전히 종료했다가 다시 실행</b>해야 적용됩니다. (Windows: 트레이 아이콘 우클릭 → Quit)</p>
         </li>
-        <li><b>브라우저</b> — Chrome/Edge 최신 버전 권장. "기기가 사설 네트워크에 연결을 시도" 경고(PNA)가 뜨면 <b>허용</b>을 선택하세요. Safari 등 일부 브라우저는 https→localhost 연결이 제한될 수 있으며, 이 경우 저장소를 내려받아 로컬(<code>start.bat</code> 또는 <code>python -m http.server</code>)에서 실행하세요.</li>
+        <li><b>브라우저 — 로컬 네트워크 접근 허용</b> (가장 흔한 원인) — Chrome은 https 페이지가 localhost에 접속할 때 권한을 요구합니다.
+          <ul style="margin:6px 0 0 18px; display:grid; gap:4px;">
+            <li>"로컬 네트워크의 기기를 찾고 연결" 알림이 뜨면 <b>허용</b>을 선택하세요.</li>
+            <li>알림 없이 계속 실패하면(이전에 차단됨): <b>주소창 왼쪽 아이콘(🔒 또는 ⚙) 클릭 → 사이트 설정 → "로컬 네트워크 기기 액세스"를 허용</b>으로 바꾸고 새로고침하세요.</li>
+          </ul>
+        </li>
+        <li><b>대안</b> — 위 설정이 번거로우면 ① 저장소를 내려받아 로컬(<code>start.bat</code>)에서 실행하거나, ② 인증 프록시+터널 공유 링크(<code>?server=…</code>)로 접속하면 이 권한 설정 없이 동작합니다.</li>
       </ol>
       <p class="modal-note">연결 없이도 페이지 탐색은 가능하지만, 질의 실행과 DB 구축은 Ollama 연결이 필요합니다.</p>
     </div>
