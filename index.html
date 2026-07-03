@@ -10,12 +10,12 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=IBM+Plex+Sans+KR:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
-<!-- 외부 라이브러리 (고정 버전) -->
-<script defer src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<!-- 외부 라이브러리 (고정 버전 + SRI 무결성 검증) -->
+<script defer src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js" integrity="sha384-/cXAMbzovUIKbBERjPmR3SnPTh8siWr5lsvFYj1Uq4XP0yaJUZJmsh0YXyGv5P0y" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a" crossorigin="anonymous"></script>
 </head>
 <body data-theme="dark">
 
@@ -35,6 +35,7 @@
   </div>
 
   <div class="topbar-controls">
+    <div class="build-chip" id="globalBuildChip" hidden role="status"><span class="build-chip-spin" aria-hidden="true"></span><span id="globalBuildText"></span></div>
     <div class="conn-box" id="connBox" role="status" aria-live="polite">
       <span class="conn-dot" id="connDot" aria-hidden="true"></span>
       <span class="conn-text" id="connText">Ollama 연결 확인 중…</span>
@@ -54,13 +55,13 @@
 
 <!-- ══════════════ 탭 내비게이션 ══════════════ -->
 <nav class="tabnav" role="tablist" aria-label="주요 화면">
-  <button class="tab-btn active" data-tab="lab" role="tab" aria-selected="true" id="tabbtn-lab">
+  <button class="tab-btn active" data-tab="lab" role="tab" aria-selected="true" id="tabbtn-lab" aria-controls="tab-lab">
     <span class="tab-num">01</span>비교 실험
   </button>
-  <button class="tab-btn" data-tab="build" role="tab" aria-selected="false" id="tabbtn-build">
+  <button class="tab-btn" data-tab="build" role="tab" aria-selected="false" id="tabbtn-build" aria-controls="tab-build">
     <span class="tab-num">02</span>문서 · DB 구축
   </button>
-  <button class="tab-btn" data-tab="viz" role="tab" aria-selected="false" id="tabbtn-viz">
+  <button class="tab-btn" data-tab="viz" role="tab" aria-selected="false" id="tabbtn-viz" aria-controls="tab-viz">
     <span class="tab-num">03</span>DB 시각화
   </button>
   <div class="tabnav-rail" aria-hidden="true"></div>
@@ -73,6 +74,9 @@
   <div class="query-console">
     <div class="query-head">
       <span class="console-label">QUERY CONSOLE</span>
+      <label class="run-mode" title="순차: 세 방식을 하나씩 실행해 GPU 경합 없이 공정하게 측정합니다. 해제 시 동시 실행(빠르지만 응답시간 지표가 서로 간섭).">
+        <input type="checkbox" id="seqMode" checked> 순차 실행 <small>공정 측정</small>
+      </label>
       <span class="db-badges">
         <span class="db-badge" id="badgeVectorDb">Vector DB <b id="badgeVectorCount">0</b> 청크</span>
         <span class="db-badge" id="badgeGraphDb">Graph DB <b id="badgeGraphCount">0</b> 노드</span>
@@ -93,7 +97,7 @@
 
   <!-- 3-way 엔진 패널 -->
   <div class="engine-grid" id="engineGrid">
-    <!-- 패널은 JS에서 templete 복제로 생성 -->
+    <!-- 패널은 JS에서 template 복제로 생성 -->
   </div>
 
   <template id="enginePanelTpl">
@@ -112,7 +116,7 @@
           <span class="sig sig-green" title="완료"></span>
         </div>
       </header>
-      <div class="engine-stage" aria-live="off"></div>
+      <div class="engine-stage" aria-live="polite"></div>
       <div class="engine-body">
         <div class="answer md-body" aria-label="응답"></div>
         <div class="engine-empty"></div>
@@ -122,12 +126,12 @@
         <div class="ctx-list"></div>
       </details>
       <footer class="metric-strip">
-        <div class="metric"><span class="m-label">검색</span><span class="m-value" data-m="retrieval">–</span></div>
-        <div class="metric"><span class="m-label">첫 토큰</span><span class="m-value" data-m="ttft">–</span></div>
-        <div class="metric"><span class="m-label">총 시간</span><span class="m-value" data-m="total">–</span></div>
-        <div class="metric"><span class="m-label">입력 토큰</span><span class="m-value" data-m="ptok">–</span></div>
-        <div class="metric"><span class="m-label">생성 토큰</span><span class="m-value" data-m="etok">–</span></div>
-        <div class="metric"><span class="m-label">생성 속도</span><span class="m-value" data-m="tps">–</span></div>
+        <div class="metric" title="질의 임베딩 + 유사 청크/그래프 탐색에 걸린 시간"><span class="m-label">검색</span><span class="m-value" data-m="retrieval">–</span></div>
+        <div class="metric" title="요청 후 첫 토큰이 도착할 때까지의 시간 (모델 로드 시간 제외)"><span class="m-label">첫 토큰</span><span class="m-value" data-m="ttft">–</span></div>
+        <div class="metric" title="검색 시간 + 전체 생성 시간"><span class="m-label">총 시간</span><span class="m-value" data-m="total">–</span></div>
+        <div class="metric" title="모델이 평가한 프롬프트 토큰 수(prompt_eval_count). 동일 접두부는 KV 캐시 재사용으로 실제보다 작게 보고될 수 있음"><span class="m-label">입력 토큰</span><span class="m-value" data-m="ptok">–</span></div>
+        <div class="metric" title="생성된 응답 토큰 수(eval_count)"><span class="m-label">생성 토큰</span><span class="m-value" data-m="etok">–</span></div>
+        <div class="metric" title="생성 토큰 ÷ 순수 생성 시간 (tokens/sec)"><span class="m-label">생성 속도</span><span class="m-value" data-m="tps">–</span></div>
       </footer>
     </article>
   </template>
@@ -396,18 +400,20 @@
         <li><b>CORS 허용 설정</b> — 웹페이지(https)에서 접속하려면 환경변수 설정이 필요합니다.
           <div class="code-block">
             <p class="code-label">Windows (PowerShell — 설정 후 Ollama 재시작)</p>
-            <pre><code>setx OLLAMA_ORIGINS "*"</code></pre>
+            <pre><code>setx OLLAMA_ORIGINS "https://mini486ok.github.io"</code></pre>
             <p class="code-label">macOS</p>
-            <pre><code>launchctl setenv OLLAMA_ORIGINS "*"</code></pre>
+            <pre><code>launchctl setenv OLLAMA_ORIGINS "https://mini486ok.github.io"</code></pre>
             <p class="code-label">Linux (systemd)</p>
             <pre><code>sudo systemctl edit ollama.service
 # [Service] 섹션에 추가:
-Environment="OLLAMA_ORIGINS=*"</code></pre>
+Environment="OLLAMA_ORIGINS=https://mini486ok.github.io"</code></pre>
           </div>
-          <p class="modal-note">설정 후 <b>Ollama를 완전히 종료했다가 다시 실행</b>해야 적용됩니다. (Windows: 트레이 아이콘 우클릭 → Quit)</p>
+          <p class="modal-note">특정 오리진만 허용하는 위 방식을 권장합니다. <code>"*"</code>는 모든 웹사이트가 로컬 Ollama에 접근할 수 있게 되므로 편의용으로만 쓰세요.
+          설정 후 <b>Ollama를 완전히 종료했다가 다시 실행</b>해야 적용됩니다. (Windows: 트레이 아이콘 우클릭 → Quit)</p>
         </li>
-        <li><b>브라우저</b> — Chrome/Edge 최신 버전 권장. 사설망 접근 차단 메시지가 뜨면 허용을 선택하세요.</li>
+        <li><b>브라우저</b> — Chrome/Edge 최신 버전 권장. "기기가 사설 네트워크에 연결을 시도" 경고(PNA)가 뜨면 <b>허용</b>을 선택하세요. Safari 등 일부 브라우저는 https→localhost 연결이 제한될 수 있으며, 이 경우 저장소를 내려받아 로컬(<code>start.bat</code> 또는 <code>python -m http.server</code>)에서 실행하세요.</li>
       </ol>
+      <p class="modal-note">연결 없이도 페이지 탐색은 가능하지만, 질의 실행과 DB 구축은 Ollama 연결이 필요합니다.</p>
     </div>
     <div class="modal-actions">
       <button class="btn-primary" id="btnRetryConn">다시 연결 시도</button>

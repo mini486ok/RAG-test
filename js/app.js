@@ -36,11 +36,20 @@ function loadSettings() {
   try {
     saved = JSON.parse(localStorage.getItem(LS_KEYS.settings) || '{}');
   } catch { /* 무시 */ }
+  const base = typeof structuredClone === 'function'
+    ? structuredClone(DEFAULTS)
+    : JSON.parse(JSON.stringify(DEFAULTS));
   return {
-    ...structuredClone(DEFAULTS),
+    ...base,
     ...saved,
-    vector: { ...DEFAULTS.vector, ...(saved.vector || {}) },
-    graph: { ...DEFAULTS.graph, ...(saved.graph || {}) },
+    vector: { ...base.vector, ...(saved.vector || {}) },
+    graph: {
+      ...base.graph,
+      ...(saved.graph || {}),
+      // DEFAULTS 원본 오염 방지: 배열은 반드시 새로 복사
+      entityTypes: [...(saved.graph?.entityTypes || base.graph.entityTypes)],
+    },
+    seqMode: saved.seqMode !== false, // 기본: 순차 실행(공정 측정)
     sysPrompt: saved.sysPrompt || SYSTEM_PROMPT_BASE,
   };
 }
@@ -72,7 +81,7 @@ class EnginePanel {
 
   reset() {
     this.setSignal('idle');
-    this.setStage('STANDBY');
+    this.setStage('STANDBY · 대기');
     this.answer.innerHTML = '';
     this.answer.classList.remove('streaming');
     this.empty.innerHTML = '';
@@ -126,9 +135,7 @@ class EnginePanel {
           </div>`
       )
       .join('');
-    for (const el of this.ctxList.querySelectorAll('.ctx-item')) {
-      el.addEventListener('click', () => el.classList.toggle('expanded'));
-    }
+    bindCtxItemToggles(this.ctxList);
   }
 
   showGraphCtx(result) {
@@ -157,9 +164,24 @@ class EnginePanel {
       )
       .join('');
     this.ctxList.innerHTML = seedHtml + tripleHtml + chunkHtml;
-    for (const el of this.ctxList.querySelectorAll('.ctx-item')) {
-      el.addEventListener('click', () => el.classList.toggle('expanded'));
-    }
+    bindCtxItemToggles(this.ctxList);
+  }
+}
+
+/** 참조 컨텍스트 아이템: 클릭/Enter/Space로 펼침 (키보드 접근성) */
+function bindCtxItemToggles(listEl) {
+  for (const el of listEl.querySelectorAll('.ctx-item')) {
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', '참조 컨텍스트 펼치기/접기');
+    const toggle = () => el.classList.toggle('expanded');
+    el.addEventListener('click', toggle);
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
+    });
   }
 }
 
@@ -194,15 +216,31 @@ function initTheme() {
 }
 
 function initTabs() {
-  for (const btn of $$('.tab-btn')) {
+  const tabs = $$('.tab-btn');
+  for (const btn of tabs) {
     btn.addEventListener('click', () => {
-      for (const b of $$('.tab-btn')) {
+      for (const b of tabs) {
         b.classList.toggle('active', b === btn);
         b.setAttribute('aria-selected', String(b === btn));
       }
       for (const p of $$('.tab-panel')) p.classList.toggle('active', p.id === `tab-${btn.dataset.tab}`);
       if (btn.dataset.tab === 'viz') refreshViz();
     });
+    // 좌우 화살표로 탭 이동 (WAI-ARIA 탭 패턴)
+    btn.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const idx = tabs.indexOf(btn);
+      const next = tabs[(idx + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus();
+      next.click();
+    });
+  }
+
+  // 파라미터 도움말(?)을 키보드/스크린리더에서도 읽을 수 있게
+  for (const h of $$('.hint')) {
+    h.tabIndex = 0;
+    h.setAttribute('role', 'note');
+    h.setAttribute('aria-label', h.dataset.tip || '도움말');
   }
 }
 
@@ -236,6 +274,13 @@ async function connect() {
   client.setBaseUrl(settings.ollamaUrl);
   try {
     models = await client.listModels();
+    if (!models.length) {
+      connected = false;
+      box.classList.add('fail');
+      $('#connText').textContent = 'Ollama에 설치된 모델이 없습니다';
+      toast('설치된 모델이 없습니다. 터미널에서 `ollama pull exaone3.5:7.8b`와 `ollama pull bge-m3`를 실행하세요.', 'err', 9000);
+      return;
+    }
     connected = true;
     box.classList.add('ok');
     $('#connText').textContent = `Ollama 연결됨 · 모델 ${models.length}개`;
@@ -245,7 +290,7 @@ async function connect() {
     connected = false;
     box.classList.add('fail');
     $('#connText').textContent = 'Ollama 연결 실패 — 클릭하여 안내 보기';
-    $('#corsModal').hidden = false;
+    showCorsModal();
     console.warn('Ollama 연결 실패:', e);
   }
 }
@@ -272,16 +317,22 @@ function populateModelSelects() {
   settings.embedModel = embedSel.value;
   saveSettings();
 
-  chatSel.addEventListener('change', () => {
-    settings.chatModel = chatSel.value;
-    saveSettings();
-    toast(`응답 모델: ${chatSel.value}`, 'info', 2000);
-  });
-  embedSel.addEventListener('change', () => {
-    settings.embedModel = embedSel.value;
-    saveSettings();
-    if (vectorStore.size) toast('임베딩 모델이 변경되었습니다. Vector DB를 다시 구축해야 검색 정합성이 유지됩니다.', 'warn', 5000);
-  });
+  // 리스너는 재연결 시 중복 등록되지 않도록 1회만 바인딩
+  if (!chatSel.dataset.bound) {
+    chatSel.dataset.bound = '1';
+    chatSel.addEventListener('change', () => {
+      settings.chatModel = chatSel.value;
+      saveSettings();
+      toast(`응답 모델: ${chatSel.value}`, 'info', 2000);
+    });
+    embedSel.addEventListener('change', () => {
+      settings.embedModel = embedSel.value;
+      saveSettings();
+      if (vectorStore.size && vectorStore.embedModel && vectorStore.embedModel !== embedSel.value) {
+        toast('임베딩 모델이 변경되었습니다. Vector/Graph DB를 다시 구축해야 검색이 동작합니다.', 'warn', 6000);
+      }
+    });
+  }
 }
 
 // ── 질의 콘솔 ──────────────────────────────
@@ -304,6 +355,14 @@ function initQueryConsole() {
       runQuery();
     }
   });
+  $('#seqMode').checked = settings.seqMode;
+  $('#seqMode').addEventListener('change', (e) => {
+    settings.seqMode = e.target.checked;
+    saveSettings();
+    toast(e.target.checked
+      ? '순차 실행: 세 방식을 하나씩 실행해 공정하게 측정합니다.'
+      : '동시 실행: 빠르지만 GPU 경합으로 시간 지표가 서로 간섭될 수 있습니다.', 'info', 4000);
+  });
   $('#btnRun').addEventListener('click', runQuery);
   $('#btnStop').addEventListener('click', () => runAbort?.abort());
   $('#btnClearHistory').addEventListener('click', () => {
@@ -312,14 +371,14 @@ function initQueryConsole() {
   });
 
   $('#connBox').addEventListener('click', () => {
-    if (!connected) $('#corsModal').hidden = false;
+    if (!connected) showCorsModal();
   });
   $('#btnRetryConn').addEventListener('click', async () => {
-    $('#corsModal').hidden = true;
+    hideCorsModal();
     await connect();
     if (connected) toast('Ollama에 연결되었습니다.', 'ok');
   });
-  $('#btnCloseCors').addEventListener('click', () => ($('#corsModal').hidden = true));
+  $('#btnCloseCors').addEventListener('click', hideCorsModal);
 }
 
 async function runQuery() {
@@ -329,8 +388,12 @@ async function runQuery() {
     return;
   }
   if (running) return;
+  if (building) {
+    toast('DB 구축이 진행 중입니다. 완료 후 질의를 실행하세요.', 'warn');
+    return;
+  }
   if (!connected) {
-    $('#corsModal').hidden = false;
+    showCorsModal();
     return;
   }
 
@@ -341,35 +404,51 @@ async function runQuery() {
   const signal = runAbort.signal;
   const run = emptyRunMetrics();
 
-  for (const p of Object.values(panels)) p.reset();
-  $('#compareSection').hidden = true;
+  try {
+    for (const p of Object.values(panels)) p.reset();
+    $('#compareSection').hidden = true;
 
-  const genOptions = {
-    temperature: settings.temperature,
-    num_ctx: settings.numCtx,
-    num_predict: settings.numPredict,
-  };
+    const genOptions = {
+      temperature: settings.temperature,
+      num_ctx: settings.numCtx,
+      num_predict: settings.numPredict,
+    };
 
-  const tasks = [
-    runBasic(query, run, genOptions, signal),
-    runVector(query, run, genOptions, signal),
-    runGraph(query, run, genOptions, signal),
-  ];
-  await Promise.allSettled(tasks);
+    const runners = [
+      () => runBasic(query, run, genOptions, signal),
+      () => runVector(query, run, genOptions, signal),
+      () => runGraph(query, run, genOptions, signal),
+    ];
 
-  renderCharts(run);
-  saveHistoryEntry(query, settings.chatModel, run);
-  renderHistory();
+    if (settings.seqMode) {
+      // 순차 실행: GPU 경합·모델 스왑 없이 공정한 지표 측정
+      for (const r of runners) {
+        if (signal.aborted) break;
+        await r();
+      }
+    } else {
+      await Promise.allSettled(runners.map((r) => r()));
+    }
 
-  running = false;
-  $('#btnRun').disabled = false;
-  $('#btnStop').disabled = true;
-  runAbort = null;
+    renderCharts(run);
+  } finally {
+    running = false;
+    $('#btnRun').disabled = false;
+    $('#btnStop').disabled = true;
+    runAbort = null;
+  }
+
+  try {
+    saveHistoryEntry(query, settings.chatModel, run);
+    renderHistory();
+  } catch (e) {
+    console.warn('기록 저장 실패:', e);
+  }
 }
 
 async function streamAnswer(panel, messages, run, genOptions, signal) {
   const m = run[panel.mode];
-  panel.setStage('GENERATING — 응답 생성 중');
+  panel.setStage('GENERATING · 응답 생성 중');
   panel.answer.classList.add('streaming');
   const renderer = makeStreamRenderer(panel.answer);
 
@@ -378,18 +457,14 @@ async function streamAnswer(panel, messages, run, genOptions, signal) {
     messages,
     options: genOptions,
     signal,
-    onToken: (_piece, full) => {
-      if (m.ttftMs == null) {
-        // TTFT는 chatStream이 정확히 계산하지만 UI는 즉시 반영
-      }
-      renderer.update(full);
-    },
+    onToken: (_piece, full) => renderer.update(full),
   });
 
   renderer.finish(res.text);
   panel.answer.classList.remove('streaming');
 
-  m.ttftMs = res.ttftMs;
+  // TTFT는 모델 로드 시간을 제외해 웜/콜드 조건 차이를 보정
+  m.ttftMs = res.ttftMs != null ? Math.max(0, res.ttftMs - (res.loadDurationMs || 0)) : null;
   m.totalMs = (m.retrievalMs || 0) + res.totalMs;
   m.promptTokens = res.promptTokens;
   m.evalTokens = res.evalTokens;
@@ -397,17 +472,39 @@ async function streamAnswer(panel, messages, run, genOptions, signal) {
   panel.applyMetrics(m);
 
   if (res.aborted) {
-    panel.setStage('ABORTED — 사용자 중단');
+    panel.setStage('ABORTED · 사용자 중단');
     panel.setSignal('idle');
+  } else if (res.incomplete) {
+    panel.setStage('INCOMPLETE · 응답이 완결되지 않음');
+    panel.setSignal('error');
+    toast(`${MODES[panel.mode].name}: 스트림이 완결 신호 없이 종료되어 응답이 잘렸을 수 있습니다.`, 'warn');
   } else {
-    panel.setStage('COMPLETE');
+    panel.setStage('COMPLETE · 완료');
     panel.setSignal('done');
   }
 }
 
+/**
+ * 컨텍스트가 num_ctx 예산을 넘지 않도록 항목을 뒤에서부터 줄임.
+ * 한국어 기준 보수적으로 1토큰 ≈ 2자 가정.
+ */
+function fitContextBudget(items, itemChars, baseChars) {
+  const budgetTokens = settings.numCtx - settings.numPredict - 256;
+  const budgetChars = Math.max(1000, budgetTokens * 2);
+  let total = baseChars;
+  const kept = [];
+  for (const it of items) {
+    const len = itemChars(it);
+    if (total + len > budgetChars && kept.length) break;
+    total += len;
+    kept.push(it);
+  }
+  return { kept, trimmed: items.length - kept.length };
+}
+
 function handleRunError(panel, e) {
   if (e.name === 'AbortError') {
-    panel.setStage('ABORTED — 사용자 중단');
+    panel.setStage('ABORTED · 사용자 중단');
     panel.setSignal('idle');
     return;
   }
@@ -432,7 +529,7 @@ async function runVector(query, run, genOptions, signal) {
   const panel = panels.vector;
   const m = run.vector;
   if (!vectorStore.size) {
-    panel.setStage('NO DATABASE');
+    panel.setStage('NO DATABASE · DB 없음');
     panel.setEmpty('Vector DB가 비어 있어 실행하지 않았습니다.<br><button class="btn-ghost btn-sm goto-build">문서 · DB 구축으로 이동</button>');
     panel.empty.querySelector('.goto-build')?.addEventListener('click', () => $('.tab-btn[data-tab="build"]').click());
     return;
@@ -440,7 +537,7 @@ async function runVector(query, run, genOptions, signal) {
   try {
     panel.setSignal('work');
     panel.setEmpty('');
-    panel.setStage('RETRIEVING — 유사 청크 검색 중');
+    panel.setStage('RETRIEVING · 유사 청크 검색 중');
     const t0 = performance.now();
     const [qVec] = await client.embed({ model: settings.embedModel, input: [query], signal });
     const results = vectorStore.search(qVec, settings.vector);
@@ -449,10 +546,15 @@ async function runVector(query, run, genOptions, signal) {
     panel.showChunks(results.map((r) => ({ ...r.chunk, score: r.score })));
 
     if (!results.length) {
-      panel.setStage('NO MATCH — 관련 청크 없음');
+      panel.setStage('NO MATCH · 관련 청크 없음');
       toast('Vector: 유사도 임계값을 넘는 청크가 없습니다. 임계값을 낮추거나 문서를 추가하세요.', 'warn');
     }
-    const ctxChunks = results.map((r) => ({ docName: r.chunk.docName, text: r.chunk.text, score: r.score }));
+    let ctxChunks = results.map((r) => ({ docName: r.chunk.docName, text: r.chunk.text, score: r.score }));
+    const fit = fitContextBudget(ctxChunks, (c) => c.text.length + 60, query.length + 400);
+    if (fit.trimmed > 0) {
+      ctxChunks = fit.kept;
+      toast(`Vector: 컨텍스트 예산 초과로 청크 ${fit.trimmed}건을 제외했습니다. (num_ctx 상향 가능)`, 'info');
+    }
     await streamAnswer(panel, buildVectorMessages(settings.sysPrompt, query, ctxChunks), run, genOptions, signal);
   } catch (e) {
     handleRunError(panel, e);
@@ -463,7 +565,7 @@ async function runGraph(query, run, genOptions, signal) {
   const panel = panels.graph;
   const m = run.graph;
   if (!graphStore.nodeCount) {
-    panel.setStage('NO DATABASE');
+    panel.setStage('NO DATABASE · DB 없음');
     panel.setEmpty('Graph DB가 비어 있어 실행하지 않았습니다.<br><button class="btn-ghost btn-sm goto-build">문서 · DB 구축으로 이동</button>');
     panel.empty.querySelector('.goto-build')?.addEventListener('click', () => $('.tab-btn[data-tab="build"]').click());
     return;
@@ -471,7 +573,7 @@ async function runGraph(query, run, genOptions, signal) {
   try {
     panel.setSignal('work');
     panel.setEmpty('');
-    panel.setStage('TRAVERSING — 지식그래프 탐색 중');
+    panel.setStage('TRAVERSING · 지식그래프 탐색 중');
     const t0 = performance.now();
     const [qVec] = await client.embed({ model: settings.embedModel, input: [query], signal });
     const result = graphStore.search(query, qVec, settings.graph);
@@ -480,13 +582,53 @@ async function runGraph(query, run, genOptions, signal) {
     panel.showGraphCtx(result);
 
     if (!result.triples.length && !result.ctxChunks.length) {
-      panel.setStage('NO MATCH — 관련 개체 없음');
+      panel.setStage('NO MATCH · 관련 개체 없음');
       toast('Graph: 질의와 연결되는 개체를 찾지 못했습니다. 시드 개체 수를 늘리거나 문서를 추가하세요.', 'warn');
     }
-    await streamAnswer(panel, buildGraphMessages(settings.sysPrompt, query, result.triples, result.ctxChunks), run, genOptions, signal);
+    // 컨텍스트 예산: 트리플 우선 유지, 원문 청크부터 축소
+    let { triples, ctxChunks } = result;
+    const tripleChars = triples.reduce((a, t) => a + t.source.length + t.target.length + t.relation.length + (t.desc?.length || 0) + 20, 0);
+    const fit = fitContextBudget(ctxChunks, (c) => c.text.length + 60, query.length + 400 + tripleChars);
+    if (fit.trimmed > 0) {
+      ctxChunks = fit.kept;
+      toast(`Graph: 컨텍스트 예산 초과로 원문 청크 ${fit.trimmed}건을 제외했습니다.`, 'info');
+    }
+    await streamAnswer(panel, buildGraphMessages(settings.sysPrompt, query, triples, ctxChunks), run, genOptions, signal);
   } catch (e) {
     handleRunError(panel, e);
   }
+}
+
+// ── 오버레이 접근성 헬퍼 (포커스 이동/복원 + Tab 트랩 + ESC) ──────
+let overlayLastFocus = null;
+
+function trapFocus(container, e) {
+  const focusables = [...container.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  )].filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function showCorsModal() {
+  const modal = $('#corsModal');
+  if (!modal.hidden) return;
+  overlayLastFocus = document.activeElement;
+  modal.hidden = false;
+  $('#btnRetryConn').focus();
+}
+
+function hideCorsModal() {
+  $('#corsModal').hidden = true;
+  overlayLastFocus?.focus?.();
 }
 
 // ── 설정 드로어 ──────────────────────────────
@@ -494,18 +636,37 @@ function initDrawer() {
   const drawer = $('#drawer');
   const backdrop = $('#drawerBackdrop');
   const openDrawer = () => {
+    overlayLastFocus = document.activeElement;
     drawer.hidden = false;
     backdrop.hidden = false;
-    requestAnimationFrame(() => drawer.classList.add('open'));
+    requestAnimationFrame(() => {
+      drawer.classList.add('open');
+      $('#ollamaUrl').focus();
+    });
   };
   const closeDrawer = () => {
     drawer.classList.remove('open');
     backdrop.hidden = true;
     setTimeout(() => (drawer.hidden = true), 300);
+    overlayLastFocus?.focus?.();
   };
   $('#btnSettings').addEventListener('click', openDrawer);
   $('#btnCloseDrawer').addEventListener('click', closeDrawer);
   backdrop.addEventListener('click', closeDrawer);
+
+  // ESC로 오버레이 닫기 + Tab 포커스 트랩
+  document.addEventListener('keydown', (e) => {
+    const modal = $('#corsModal');
+    if (e.key === 'Escape') {
+      if (!modal.hidden) hideCorsModal();
+      else if (drawer.classList.contains('open')) closeDrawer();
+      return;
+    }
+    if (e.key === 'Tab') {
+      if (!modal.hidden) trapFocus(modal, e);
+      else if (drawer.classList.contains('open')) trapFocus(drawer, e);
+    }
+  });
 
   $('#ollamaUrl').value = settings.ollamaUrl;
   $('#temperature').value = settings.temperature;
@@ -657,6 +818,10 @@ function renderEntityTags() {
 }
 
 async function handleFiles(files) {
+  if (building) {
+    toast('DB 구축 중에는 문서를 추가할 수 없습니다.', 'warn');
+    return;
+  }
   for (const file of files) {
     if (!detectType(file.name)) {
       toast(`지원하지 않는 형식: ${file.name}`, 'warn');
@@ -737,6 +902,10 @@ function refreshDocList() {
 }
 
 async function removeDocEverywhere(docId, { silent } = {}) {
+  if (building) {
+    toast('DB 구축 중에는 문서를 삭제할 수 없습니다.', 'warn');
+    return;
+  }
   const doc = docs.find((d) => d.id === docId);
   await idb.delete('docs', docId);
   await vectorStore.removeDoc(docId);
@@ -750,6 +919,10 @@ async function removeDocEverywhere(docId, { silent } = {}) {
 }
 
 async function clearAllData() {
+  if (building) {
+    toast('DB 구축 중에는 초기화할 수 없습니다. 먼저 구축을 중단하세요.', 'warn');
+    return;
+  }
   if (!confirm('업로드 문서와 Vector/Graph DB, 실험 기록을 모두 삭제합니다. 계속할까요?')) return;
   await idb.clearAll();
   await vectorStore.clear();
@@ -772,22 +945,36 @@ function setBuildingUI(kind, active) {
   $('#btnBuildAll').disabled = active;
   $('#btnCancelBuild').hidden = !active;
   $(`#${kind}ProgressBox`).hidden = !active;
+  // 구축 중 데이터 변경 차단 (정합성 보호)
+  $('#btnClearAll').disabled = active;
+  $('#btnLoadSample').disabled = active;
+  $('#fileInput').disabled = active;
+  $('#dropzone').classList.toggle('disabled', active);
+  for (const b of $$('.doc-del')) b.disabled = active;
+  // 다른 탭에서도 보이는 전역 진행 칩
+  $('#globalBuildChip').hidden = !active;
+  if (active) $('#globalBuildText').textContent = kind === 'v' ? 'Vector DB 구축 중' : 'Graph DB 구축 중';
 }
 
 function updateProgress(kind, done, total, stage) {
   const pct = total ? Math.round((done / total) * 100) : 0;
   $(`#${kind}ProgressFill`).style.width = pct + '%';
   $(`#${kind}ProgressText`).textContent = `${stage} ${done}/${total} (${pct}%)`;
+  $('#globalBuildText').textContent = `${kind === 'v' ? 'Vector' : 'Graph'} 구축 ${pct}%`;
 }
 
 async function buildVector() {
   if (building) return false;
+  if (running) {
+    toast('질의 실행 중에는 DB를 구축할 수 없습니다.', 'warn');
+    return false;
+  }
   if (!docs.length) {
     toast('먼저 문서를 업로드하거나 샘플 문서를 로드하세요.', 'warn');
     return false;
   }
   if (!connected) {
-    $('#corsModal').hidden = false;
+    showCorsModal();
     return false;
   }
   if (settings.vector.overlap >= settings.vector.chunkSize) {
@@ -827,12 +1014,16 @@ async function buildVector() {
 
 async function buildGraph() {
   if (building) return false;
+  if (running) {
+    toast('질의 실행 중에는 DB를 구축할 수 없습니다.', 'warn');
+    return false;
+  }
   if (!docs.length) {
     toast('먼저 문서를 업로드하거나 샘플 문서를 로드하세요.', 'warn');
     return false;
   }
   if (!connected) {
-    $('#corsModal').hidden = false;
+    showCorsModal();
     return false;
   }
 
@@ -840,7 +1031,7 @@ async function buildGraph() {
   buildAbort = new AbortController();
   const t0 = performance.now();
   try {
-    const { nodes, edges } = await graphStore.build(
+    const { nodes, edges, failed } = await graphStore.build(
       docs,
       settings.graph,
       client,
@@ -849,6 +1040,7 @@ async function buildGraph() {
       buildAbort.signal
     );
     toast(`Graph DB 구축 완료: ${nodes}개 노드 · ${edges}개 관계 (${fmtMs(performance.now() - t0)})`, 'ok', 6000);
+    if (failed > 0) toast(`추출 실패 청크 ${failed}건은 건너뛰었습니다. 그래프 밀도가 낮으면 재구축해 보세요.`, 'warn', 6000);
     vizGraphDirty = true;
     refreshDbStats();
     setIdleEmptyStates();

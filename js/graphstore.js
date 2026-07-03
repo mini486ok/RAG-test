@@ -1,24 +1,161 @@
 // ═══════════════════════════════════════════════
 // Graph Store (지식그래프)
 //  - 구축: 청크별 LLM 개체·관계 추출(JSON) → 병합 → 개체 임베딩
-//  - 검색: 질의 임베딩 ↔ 개체 임베딩 + 어휘 매칭 → n-hop 확장
-//  - 저장: IndexedDB (nodes / edges)
+//    ※ 임시 상태(work)에 구축 후 성공 시에만 교체 — 중단/실패 시 기존 상태 무손상
+//  - 검색: 질의 임베딩 ↔ 개체 임베딩 + 어휘/별칭 매칭 → n-hop BFS 확장
+//  - 저장: IndexedDB 단일 트랜잭션 (nodes / edges / meta 원자적 교체)
 // ═══════════════════════════════════════════════
 
 import { idb } from './db.js';
 import { chunkText } from './chunker.js';
 import { dot } from './ollama.js';
-import { buildExtractionPrompt, buildGleaningPrompt } from './config.js';
+import { buildExtractionPrompt, buildGleaningPrompt, RAIL_ALIASES } from './config.js';
 import { uid } from './ui.js';
 
 function normName(name) {
-  return name.trim().replace(/\s+/g, ' ').toLowerCase();
+  return String(name).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+// 흔한 한국어 조사(말미) — 기존 노드가 있을 때만 병합에 사용하는 보수적 휴리스틱
+const PARTICLES_2 = ['으로', '에서', '부터', '까지', '에게', '이다'];
+const PARTICLES_1 = ['은', '는', '이', '가', '을', '를', '의', '와', '과', '도', '로', '에'];
+
+/** 개체명 키 결정: 정확 일치 → 조사 제거 형태가 이미 존재하면 그 키로 병합 */
+function resolveKey(state, rawName) {
+  const k = normName(rawName);
+  if (state.nodes.has(k)) return k;
+  for (const p of PARTICLES_2) {
+    if (k.length > p.length + 1 && k.endsWith(p)) {
+      const stripped = k.slice(0, -p.length);
+      if (state.nodes.has(stripped)) return stripped;
+    }
+  }
+  for (const p of PARTICLES_1) {
+    if (k.length > 2 && k.endsWith(p)) {
+      const stripped = k.slice(0, -1);
+      if (state.nodes.has(stripped)) return stripped;
+    }
+  }
+  return k;
+}
+
+/** 추출 결과를 상태(state)에 병합 */
+function mergeInto(state, ext, unit, entityTypes) {
+  const typeSet = new Set(entityTypes);
+  for (const e of ext.entities) {
+    if (!e.name || typeof e.name !== 'string') continue;
+    const key = resolveKey(state, e.name);
+    if (!key || key.length > 60) continue;
+    let node = state.nodes.get(key);
+    if (!node) {
+      node = {
+        id: uid(),
+        name: e.name.trim(),
+        // 허용 목록 밖 유형은 '개념/용어'로 강제 — 범례/필터 일관성 유지
+        type: typeSet.has(e.type) ? e.type : '개념/용어',
+        desc: (e.description || '').slice(0, 300),
+        degree: 0,
+        weight: 0,
+        chunkIds: [],
+        docIds: [],
+        vec: null,
+      };
+      state.nodes.set(key, node);
+    } else if (e.description && node.desc.length < 240 && !node.desc.includes(e.description.slice(0, 40))) {
+      node.desc = (node.desc + ' ' + e.description).slice(0, 300);
+    }
+    node.weight++;
+    if (!node.chunkIds.includes(unit.chunkId)) node.chunkIds.push(unit.chunkId);
+    if (!node.docIds.includes(unit.docId)) node.docIds.push(unit.docId);
+  }
+
+  for (const r of ext.relations) {
+    if (!r.source || !r.target || !r.relation) continue;
+    const sKey = resolveKey(state, String(r.source));
+    const tKey = resolveKey(state, String(r.target));
+    if (!sKey || !tKey || sKey === tKey) continue;
+    // 관계에만 등장한 개체도 노드로 승격
+    for (const [k, orig] of [[sKey, r.source], [tKey, r.target]]) {
+      if (!state.nodes.has(k)) {
+        state.nodes.set(k, {
+          id: uid(), name: String(orig).trim(), type: '개념/용어', desc: '',
+          degree: 0, weight: 1, chunkIds: [unit.chunkId], docIds: [unit.docId], vec: null,
+        });
+      }
+    }
+    const eKey = `${sKey}→${String(r.relation).trim()}→${tKey}`;
+    let edge = state.edges.get(eKey);
+    if (!edge) {
+      edge = {
+        id: eKey,
+        source: state.nodes.get(sKey).name,
+        target: state.nodes.get(tKey).name,
+        sourceKey: sKey,
+        targetKey: tKey,
+        relation: String(r.relation).trim().slice(0, 40),
+        desc: (r.description || '').slice(0, 200),
+        weight: 0,
+        chunkIds: [],
+      };
+      state.edges.set(eKey, edge);
+      state.nodes.get(sKey).degree++;
+      state.nodes.get(tKey).degree++;
+    }
+    edge.weight++;
+    if (!edge.chunkIds.includes(unit.chunkId)) edge.chunkIds.push(unit.chunkId);
+  }
+}
+
+/** 상태에서 특정 문서 흔적 제거 + degree 재계산 */
+function removeDocFromState(state, docId) {
+  for (const [key, node] of state.nodes) {
+    node.docIds = node.docIds.filter((d) => d !== docId);
+    node.chunkIds = node.chunkIds.filter((c) => !c.startsWith(docId + '-g'));
+    if (!node.docIds.length) state.nodes.delete(key);
+  }
+  for (const [key, edge] of state.edges) {
+    edge.chunkIds = edge.chunkIds.filter((c) => !c.startsWith(docId + '-g'));
+    if (!edge.chunkIds.length || !state.nodes.has(edge.sourceKey) || !state.nodes.has(edge.targetKey)) {
+      state.edges.delete(key);
+    }
+  }
+  for (const cid of [...state.chunkTexts.keys()]) {
+    if (cid.startsWith(docId + '-g')) state.chunkTexts.delete(cid);
+  }
+  for (const n of state.nodes.values()) n.degree = 0;
+  for (const e of state.edges.values()) {
+    const s = state.nodes.get(e.sourceKey);
+    const t = state.nodes.get(e.targetKey);
+    if (s) s.degree++;
+    if (t) t.degree++;
+  }
+}
+
+/** 상태 딥카피 (vec은 불변이므로 참조 공유) */
+function cloneState(store) {
+  return {
+    nodes: new Map([...store.nodes].map(([k, n]) => [k, { ...n, chunkIds: [...n.chunkIds], docIds: [...n.docIds] }])),
+    edges: new Map([...store.edges].map(([k, e]) => [k, { ...e, chunkIds: [...e.chunkIds] }])),
+    chunkTexts: new Map(store.chunkTexts),
+  };
+}
+
+/** 질의에 철도 약어·동의어 별칭 확장 적용 */
+function expandQuery(query) {
+  const q = query.toLowerCase();
+  let extra = '';
+  for (const group of RAIL_ALIASES) {
+    if (group.some((term) => q.includes(term.toLowerCase()))) {
+      extra += ' ' + group.join(' ');
+    }
+  }
+  return q + extra.toLowerCase();
 }
 
 export class GraphStore {
   constructor() {
-    this.nodes = new Map(); // normName → {id, name, type, desc, degree, weight, chunkIds:[], docIds:[], vec}
-    this.edges = new Map(); // key → {id, source, target, relation, desc, weight, chunkIds:[]}
+    this.nodes = new Map(); // normName → node
+    this.edges = new Map(); // edgeKey → edge
     this.chunkTexts = new Map(); // chunkId → {text, docName}
   }
 
@@ -43,17 +180,12 @@ export class GraphStore {
   }
 
   /**
-   * 그래프 구축.
-   * @param {Array<{id,name,text}>} docs
-   * @param {{maxTriples,gleaning,extractChunkSize,entityTypes}} params
-   * @param {OllamaClient} client
-   * @param {{chatModel, embedModel, numCtx}} models
-   * @param {(done,total,stage)=>void} onProgress
-   * @param {AbortSignal} signal
+   * 그래프 구축 — 임시 상태에 수행하고 성공 시에만 커밋.
+   * @returns {{nodes:number, edges:number, failed:number}}
    */
   async build(docs, params, client, models, onProgress, signal) {
-    // 재구축 대상 문서의 기존 흔적 제거
-    for (const doc of docs) this.removeDocLocal(doc.id);
+    const work = cloneState(this);
+    for (const doc of docs) removeDocFromState(work, doc.id);
 
     // 1) 추출용 청킹 (벡터 청크보다 큰 단위)
     const units = [];
@@ -65,9 +197,10 @@ export class GraphStore {
 
     // 2) 청크별 LLM 추출
     let done = 0;
+    let failed = 0;
     for (const unit of units) {
       if (signal?.aborted) throw new DOMException('중단됨', 'AbortError');
-      this.chunkTexts.set(unit.chunkId, { text: unit.text, docName: unit.docName });
+      work.chunkTexts.set(unit.chunkId, { text: unit.text, docName: unit.docName });
 
       const messages = [
         { role: 'user', content: buildExtractionPrompt(unit.text, params.entityTypes, params.maxTriples) },
@@ -76,10 +209,12 @@ export class GraphStore {
         const raw = await client.chatJSON({
           model: models.chatModel,
           messages,
-          options: { temperature: 0.1, num_ctx: models.numCtx, num_predict: 1200 },
+          options: { temperature: 0.1, num_ctx: models.numCtx, num_predict: 2000 },
           signal,
         });
-        this.mergeExtraction(parseExtraction(raw), unit, params.entityTypes);
+        const ext = parseExtraction(raw);
+        if (!ext.entities.length && !ext.relations.length) failed++;
+        mergeInto(work, ext, unit, params.entityTypes);
 
         // gleaning: 추가 추출 반복
         for (let g = 0; g < (params.gleaning || 0); g++) {
@@ -87,23 +222,24 @@ export class GraphStore {
           const gRaw = await client.chatJSON({
             model: models.chatModel,
             messages: [...messages, { role: 'assistant', content: raw }, { role: 'user', content: buildGleaningPrompt() }],
-            options: { temperature: 0.1, num_ctx: models.numCtx, num_predict: 800 },
+            options: { temperature: 0.1, num_ctx: models.numCtx, num_predict: 1200 },
             signal,
           });
-          this.mergeExtraction(parseExtraction(gRaw), unit, params.entityTypes);
+          mergeInto(work, parseExtraction(gRaw), unit, params.entityTypes);
         }
       } catch (e) {
         if (e.name === 'AbortError') throw e;
+        failed++;
         console.warn('추출 실패(스킵):', unit.chunkId, e.message);
       }
       done++;
-      onProgress?.(done, units.length, '개체·관계 추출');
+      onProgress?.(done, units.length, failed ? `개체·관계 추출 (실패 ${failed})` : '개체·관계 추출');
     }
 
-    if (!this.nodes.size) throw new Error('추출된 개체가 없습니다. 모델 또는 문서를 확인하세요.');
+    if (!work.nodes.size) throw new Error('추출된 개체가 없습니다. 모델 또는 문서를 확인하세요.');
 
     // 3) 개체 임베딩 (검색용)
-    const nodeArr = [...this.nodes.values()].filter((n) => !n.vec);
+    const nodeArr = [...work.nodes.values()].filter((n) => !n.vec);
     const batch = 12;
     for (let i = 0; i < nodeArr.length; i += batch) {
       if (signal?.aborted) throw new DOMException('중단됨', 'AbortError');
@@ -114,137 +250,51 @@ export class GraphStore {
       onProgress?.(Math.min(i + batch, nodeArr.length), nodeArr.length, '개체 임베딩');
     }
 
-    await this.persist();
-    return { nodes: this.nodes.size, edges: this.edges.size };
-  }
-
-  mergeExtraction(ext, unit, entityTypes) {
-    const typeSet = new Set(entityTypes);
-    for (const e of ext.entities) {
-      if (!e.name || typeof e.name !== 'string') continue;
-      const key = normName(e.name);
-      if (!key || key.length > 60) continue;
-      let node = this.nodes.get(key);
-      if (!node) {
-        node = {
-          id: uid(),
-          name: e.name.trim(),
-          type: typeSet.has(e.type) ? e.type : (e.type || '개념/용어'),
-          desc: (e.description || '').slice(0, 300),
-          degree: 0,
-          weight: 0,
-          chunkIds: [],
-          docIds: [],
-          vec: null,
-        };
-        this.nodes.set(key, node);
-      } else if (e.description && node.desc.length < 240 && !node.desc.includes(e.description.slice(0, 40))) {
-        node.desc = (node.desc + ' ' + e.description).slice(0, 300);
-      }
-      node.weight++;
-      if (!node.chunkIds.includes(unit.chunkId)) node.chunkIds.push(unit.chunkId);
-      if (!node.docIds.includes(unit.docId)) node.docIds.push(unit.docId);
-    }
-
-    for (const r of ext.relations) {
-      if (!r.source || !r.target || !r.relation) continue;
-      const sKey = normName(String(r.source));
-      const tKey = normName(String(r.target));
-      if (!sKey || !tKey || sKey === tKey) continue;
-      // 관계에만 등장한 개체도 노드로 승격
-      for (const [k, orig] of [[sKey, r.source], [tKey, r.target]]) {
-        if (!this.nodes.has(k)) {
-          this.nodes.set(k, {
-            id: uid(), name: String(orig).trim(), type: '개념/용어', desc: '',
-            degree: 0, weight: 1, chunkIds: [unit.chunkId], docIds: [unit.docId], vec: null,
-          });
-        }
-      }
-      const eKey = `${sKey}→${String(r.relation).trim()}→${tKey}`;
-      let edge = this.edges.get(eKey);
-      if (!edge) {
-        edge = {
-          id: eKey,
-          source: this.nodes.get(sKey).name,
-          target: this.nodes.get(tKey).name,
-          sourceKey: sKey,
-          targetKey: tKey,
-          relation: String(r.relation).trim().slice(0, 40),
-          desc: (r.description || '').slice(0, 200),
-          weight: 0,
-          chunkIds: [],
-        };
-        this.edges.set(eKey, edge);
-        this.nodes.get(sKey).degree++;
-        this.nodes.get(tKey).degree++;
-      }
-      edge.weight++;
-      if (!edge.chunkIds.includes(unit.chunkId)) edge.chunkIds.push(unit.chunkId);
-    }
-  }
-
-  async persist() {
-    await idb.clear('nodes');
-    await idb.clear('edges');
-    await idb.bulkPut('nodes', [...this.nodes.values()]);
-    await idb.bulkPut('edges', [...this.edges.values()]);
-    await idb.put('meta', { key: 'graphChunks', value: Object.fromEntries(this.chunkTexts) });
-    await idb.put('meta', { key: 'graphBuiltAt', value: Date.now() });
-  }
-
-  removeDocLocal(docId) {
-    for (const [key, node] of this.nodes) {
-      node.docIds = node.docIds.filter((d) => d !== docId);
-      node.chunkIds = node.chunkIds.filter((c) => !c.startsWith(docId + '-g'));
-      if (!node.docIds.length) this.nodes.delete(key);
-    }
-    for (const [key, edge] of this.edges) {
-      edge.chunkIds = edge.chunkIds.filter((c) => !c.startsWith(docId + '-g'));
-      if (!edge.chunkIds.length || !this.nodes.has(edge.sourceKey) || !this.nodes.has(edge.targetKey)) {
-        this.edges.delete(key);
-      }
-    }
-    for (const cid of [...this.chunkTexts.keys()]) {
-      if (cid.startsWith(docId + '-g')) this.chunkTexts.delete(cid);
-    }
-    // degree 재계산
-    for (const n of this.nodes.values()) n.degree = 0;
-    for (const e of this.edges.values()) {
-      const s = this.nodes.get(e.sourceKey);
-      const t = this.nodes.get(e.targetKey);
-      if (s) s.degree++;
-      if (t) t.degree++;
-    }
+    // 4) 원자적 저장 성공 후에만 메모리 상태 교체
+    await persistState(work);
+    this.nodes = work.nodes;
+    this.edges = work.edges;
+    this.chunkTexts = work.chunkTexts;
+    return { nodes: this.nodes.size, edges: this.edges.size, failed };
   }
 
   async removeDoc(docId) {
-    this.removeDocLocal(docId);
-    await this.persist();
+    const work = cloneState(this);
+    removeDocFromState(work, docId);
+    await persistState(work);
+    this.nodes = work.nodes;
+    this.edges = work.edges;
+    this.chunkTexts = work.chunkTexts;
   }
 
   async clear() {
-    await idb.clear('nodes');
-    await idb.clear('edges');
-    await idb.delete('meta', 'graphChunks');
+    await idb.atomicWrite([
+      { store: 'nodes', clear: true },
+      { store: 'edges', clear: true },
+      { store: 'meta', deleteKeys: ['graphChunks', 'graphBuiltAt'] },
+    ]);
     this.nodes.clear();
     this.edges.clear();
     this.chunkTexts.clear();
   }
 
   /**
-   * 그래프 검색: 시드 개체(임베딩+어휘) → n-hop 확장 → 트리플 랭킹
+   * 그래프 검색: 시드 개체(임베딩+어휘·별칭) → n-hop BFS(프론티어 단위) → 트리플 랭킹
    * @returns {{triples:Array, seeds:Array, ctxChunks:Array}}
    */
   search(query, queryVec, { topKEntities = 6, hops = 2, maxCtxTriples = 30, chunkTopK = 2 } = {}) {
     if (!this.nodes.size) return { triples: [], seeds: [], ctxChunks: [] };
-    const qLower = query.toLowerCase();
+    const qExpanded = expandQuery(query);
 
-    // 1) 시드 개체 점수: 임베딩 유사도 + 어휘 포함 부스트
+    // 1) 시드 개체 점수: 임베딩 유사도 + 어휘/별칭 포함 부스트
     const scored = [];
     for (const node of this.nodes.values()) {
-      let score = node.vec && queryVec ? dot(queryVec, node.vec) : 0;
+      let score = 0;
+      if (node.vec && queryVec && node.vec.length === queryVec.length) {
+        score = dot(queryVec, node.vec);
+      }
       const nLower = node.name.toLowerCase();
-      if (qLower.includes(nLower) && nLower.length >= 2) score += 0.35;
+      if (nLower.length >= 2 && qExpanded.includes(nLower)) score += 0.35;
       scored.push({ node, score });
     }
     scored.sort((a, b) => b.score - a.score);
@@ -253,19 +303,22 @@ export class GraphStore {
 
     const seedScore = new Map(seeds.map((s) => [normName(s.node.name), s.score]));
 
-    // 2) n-hop 확장 (BFS, 거리 감쇠)
+    // 2) n-hop BFS 확장 — 각 hop은 직전 프론티어만 확장 (거리 정확성 보장)
     const nodeDist = new Map([...seedScore.keys()].map((k) => [k, 0]));
-    let frontier = [...seedScore.keys()];
-    for (let h = 1; h <= hops; h++) {
-      const next = [];
+    let frontier = new Set(seedScore.keys());
+    for (let h = 1; h <= hops && frontier.size; h++) {
+      const next = new Set();
       for (const e of this.edges.values()) {
-        const sIn = nodeDist.has(e.sourceKey);
-        const tIn = nodeDist.has(e.targetKey);
-        if (sIn && !nodeDist.has(e.targetKey)) { nodeDist.set(e.targetKey, h); next.push(e.targetKey); }
-        else if (tIn && !nodeDist.has(e.sourceKey)) { nodeDist.set(e.sourceKey, h); next.push(e.sourceKey); }
+        if (frontier.has(e.sourceKey) && !nodeDist.has(e.targetKey)) {
+          nodeDist.set(e.targetKey, h);
+          next.add(e.targetKey);
+        }
+        if (frontier.has(e.targetKey) && !nodeDist.has(e.sourceKey)) {
+          nodeDist.set(e.sourceKey, h);
+          next.add(e.sourceKey);
+        }
       }
       frontier = next;
-      if (!frontier.length) break;
     }
 
     // 3) 서브그래프 엣지 랭킹
@@ -289,18 +342,23 @@ export class GraphStore {
       chunkIds: edge.chunkIds,
     }));
 
-    // 4) 시드 개체 관련 원문 청크
+    // 4) 시드 개체 관련 원문 청크 — 시드 간 라운드로빈으로 다양성 확보
     const ctxChunks = [];
-    const seen = new Set();
-    for (const s of seeds) {
-      for (const cid of s.node.chunkIds) {
-        if (seen.has(cid)) continue;
-        seen.add(cid);
-        const rec = this.chunkTexts.get(cid);
-        if (rec) ctxChunks.push({ chunkId: cid, text: rec.text, docName: rec.docName, score: s.score });
-        if (ctxChunks.length >= chunkTopK) break;
+    if (chunkTopK > 0) {
+      const seen = new Set();
+      outer: for (let round = 0; round < 8; round++) {
+        let advanced = false;
+        for (const s of seeds) {
+          const cid = s.node.chunkIds[round];
+          if (!cid || seen.has(cid)) continue;
+          seen.add(cid);
+          advanced = true;
+          const rec = this.chunkTexts.get(cid);
+          if (rec) ctxChunks.push({ chunkId: cid, text: rec.text, docName: rec.docName, score: s.score });
+          if (ctxChunks.length >= chunkTopK) break outer;
+        }
+        if (!advanced) break;
       }
-      if (ctxChunks.length >= chunkTopK) break;
     }
 
     return {
@@ -310,10 +368,9 @@ export class GraphStore {
     };
   }
 
-  /** 시각화용 데이터 */
-  vizData(maxNodes = 400) {
+  /** 시각화용 데이터 (노드 400 · 엣지 800 상한) */
+  vizData(maxNodes = 400, maxEdges = 800) {
     let nodes = [...this.nodes.values()];
-    // 연결도 높은 순으로 제한
     nodes.sort((a, b) => (b.degree + b.weight) - (a.degree + a.weight));
     const keep = new Set(nodes.slice(0, maxNodes).map((n) => normName(n.name)));
     const vNodes = nodes.slice(0, maxNodes).map((n) => ({
@@ -326,8 +383,14 @@ export class GraphStore {
     }));
     const vEdges = [...this.edges.values()]
       .filter((e) => keep.has(e.sourceKey) && keep.has(e.targetKey))
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, maxEdges)
       .map((e) => ({ source: e.sourceKey, target: e.targetKey, relation: e.relation, weight: e.weight }));
-    return { nodes: vNodes, edges: vEdges, truncated: this.nodes.size > maxNodes };
+    return {
+      nodes: vNodes,
+      edges: vEdges,
+      truncated: this.nodes.size > maxNodes || this.edges.size > vEdges.length,
+    };
   }
 
   /** 특정 노드의 인접 관계 목록 */
@@ -339,6 +402,21 @@ export class GraphStore {
     }
     return out;
   }
+}
+
+/** 상태를 IndexedDB에 원자적으로 기록 */
+async function persistState(state) {
+  await idb.atomicWrite([
+    { store: 'nodes', clear: true, put: [...state.nodes.values()] },
+    { store: 'edges', clear: true, put: [...state.edges.values()] },
+    {
+      store: 'meta',
+      put: [
+        { key: 'graphChunks', value: Object.fromEntries(state.chunkTexts) },
+        { key: 'graphBuiltAt', value: Date.now() },
+      ],
+    },
+  ]);
 }
 
 /** LLM JSON 응답 → {entities, relations} (관대한 파싱) */

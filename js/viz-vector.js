@@ -168,8 +168,11 @@ export class VectorViz {
       this.scheduleDraw();
     }, { passive: false });
 
-    const ro = new ResizeObserver(() => this.scheduleDraw());
-    ro.observe(c);
+    if ('ResizeObserver' in window) {
+      new ResizeObserver(() => this.scheduleDraw()).observe(c);
+    } else {
+      window.addEventListener('resize', () => this.scheduleDraw());
+    }
   }
 
   showTooltip(p, mx, my) {

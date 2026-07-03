@@ -20,8 +20,10 @@ export class VectorStore {
     const rows = await idb.getAll('chunks');
     this.chunks = rows
       .map((r) => ({ ...r, vec: r.vec instanceof Float32Array ? r.vec : new Float32Array(r.vec) }))
-      .sort((a, b) => (a.docId + a.seq).localeCompare(b.docId + b.seq));
+      .sort((a, b) => a.docId.localeCompare(b.docId) || a.seq - b.seq);
     this.dim = this.chunks[0]?.vec.length || 0;
+    const meta = await idb.get('meta', 'vectorBuiltAt');
+    this.embedModel = meta?.model || null;
   }
 
   get size() {
@@ -63,15 +65,17 @@ export class VectorStore {
       onProgress?.(Math.min(i + batch, newChunks.length), newChunks.length, '임베딩');
     }
 
-    // 3) 저장: 대상 문서의 기존 청크 제거 후 삽입
+    // 3) 저장: 기존 청크 삭제 + 신규 삽입 + 메타를 단일 트랜잭션으로 (원자성)
     const rebuiltDocIds = new Set(docs.map((d) => d.id));
     const stale = this.chunks.filter((c) => rebuiltDocIds.has(c.docId)).map((c) => c.id);
-    await idb.bulkDelete('chunks', stale);
-    await idb.bulkPut('chunks', newChunks);
-    await idb.put('meta', { key: 'vectorBuiltAt', value: Date.now(), model: embedModel, params: { chunkSize: params.chunkSize, overlap: params.overlap } });
+    await idb.atomicWrite([
+      { store: 'chunks', deleteKeys: stale, put: newChunks },
+      { store: 'meta', put: [{ key: 'vectorBuiltAt', value: Date.now(), model: embedModel, dim: newChunks[0].vec.length, params: { chunkSize: params.chunkSize, overlap: params.overlap } }] },
+    ]);
 
     this.chunks = [...this.chunks.filter((c) => !rebuiltDocIds.has(c.docId)), ...newChunks];
     this.dim = this.chunks[0]?.vec.length || 0;
+    this.embedModel = embedModel;
     return newChunks.length;
   }
 
@@ -93,6 +97,10 @@ export class VectorStore {
    */
   search(queryVec, { topK = 4, minScore = 0, mmr = true, mmrLambda = 0.6 } = {}) {
     if (!this.chunks.length) return [];
+    if (!queryVec || !queryVec.length) throw new Error('질의 임베딩이 비어 있습니다. 임베딩 모델을 확인하세요.');
+    if (this.dim && queryVec.length !== this.dim) {
+      throw new Error(`임베딩 차원 불일치 (DB ${this.dim} vs 질의 ${queryVec.length}). 임베딩 모델이 바뀌었으면 Vector DB를 다시 구축하세요.`);
+    }
     const scored = this.chunks
       .map((chunk) => ({ chunk, score: dot(queryVec, chunk.vec) }))
       .filter((r) => r.score >= minScore)
@@ -128,7 +136,7 @@ export class VectorStore {
    * PCA 2D 투영 (파워 이터레이션, 공분산 행렬 비생성 — O(n·d·iter))
    * @returns {Array<{x,y,chunk}>}
    */
-  project2D(maxPoints = 2000) {
+  project2D(maxPoints = 1500) {
     const n = this.chunks.length;
     if (n < 2) return [];
     const sample = n > maxPoints
@@ -169,7 +177,7 @@ export class VectorStore {
         for (let j = 0; j < d; j++) proj += v[j] * deflateWith[j];
         for (let j = 0; j < d; j++) v[j] -= proj * deflateWith[j];
       }
-      for (let it = 0; it < 24; it++) {
+      for (let it = 0; it < 16; it++) {
         const nv = covMul(v, deflateWith);
         let norm = 0;
         for (let j = 0; j < d; j++) norm += nv[j] * nv[j];

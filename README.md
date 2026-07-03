@@ -13,8 +13,8 @@
 
 | 기능 | 설명 |
 |---|---|
-| **3-way 실시간 비교** | 하나의 질문에 대해 Basic / Vector RAG / Graph RAG가 동시에 스트리밍 응답 |
-| **성능 계기판** | 총 응답시간 · 첫 토큰 지연(TTFT) · 검색 시간 · 입력/생성 토큰 · 생성 속도(tok/s) 비교 차트 |
+| **3-way 실시간 비교** | 하나의 질문에 대해 Basic / Vector RAG / Graph RAG가 스트리밍으로 응답. 기본은 **순차 실행**(GPU 경합 없이 공정한 시간 측정), 옵션으로 동시 실행 가능 |
+| **성능 계기판** | 총 응답시간 · 첫 토큰 지연(TTFT, 모델 로드 제외) · 검색 시간 · 입력/생성 토큰 · 생성 속도(tok/s) 비교 차트 |
 | **문서 업로드 → 자동 DB 구축** | PDF · DOCX · PPTX · HWPX · MD · TXT 지원, 브라우저에서 직접 파싱 |
 | **Vector DB** | 문장 인식 청킹 → bge-m3 임베딩 → 코사인 Top-K + MMR 재순위화 |
 | **Graph DB** | LLM 기반 개체·관계 추출 → 지식그래프 구축 → 시드 개체 탐색 + n-hop 확장 |
@@ -34,17 +34,17 @@ ollama pull bge-m3           # 임베딩 (다국어 검색)
 
 ### 2. CORS 허용 (웹 배포판 사용 시 필수)
 
-브라우저가 `https://…github.io`에서 `http://localhost:11434`로 직접 접속하므로 Ollama에 허용 오리진을 설정해야 합니다.
+브라우저가 `https://…github.io`에서 `http://localhost:11434`로 직접 접속하므로 Ollama에 허용 오리진을 설정해야 합니다. **보안을 위해 특정 오리진만 허용하는 방식을 권장합니다.**
 
 **Windows (PowerShell):**
 ```powershell
-setx OLLAMA_ORIGINS "*"
+setx OLLAMA_ORIGINS "https://mini486ok.github.io"
 # 이후 트레이 아이콘에서 Ollama 완전 종료 후 재실행
 ```
 
 **macOS:**
 ```bash
-launchctl setenv OLLAMA_ORIGINS "*"
+launchctl setenv OLLAMA_ORIGINS "https://mini486ok.github.io"
 # Ollama 재시작
 ```
 
@@ -52,9 +52,14 @@ launchctl setenv OLLAMA_ORIGINS "*"
 ```bash
 sudo systemctl edit ollama.service
 # [Service] 섹션에 추가:
-# Environment="OLLAMA_ORIGINS=*"
+# Environment="OLLAMA_ORIGINS=https://mini486ok.github.io"
 sudo systemctl restart ollama
 ```
+
+> `"*"`로 설정하면 모든 웹사이트가 로컬 Ollama에 접근할 수 있게 되므로(무단 추론·모델 열람 위험) 임시 테스트 용도로만 쓰세요.
+> 로컬 실행(`python -m http.server`) 시에는 localhost 오리진이 기본 허용되어 이 설정이 필요 없습니다.
+
+**지원 브라우저**: Chrome/Edge 최신 버전 권장. Chrome의 "사설 네트워크 접근(PNA)" 경고가 뜨면 허용을 선택하세요. Safari 등 일부 브라우저는 https→localhost 연결이 제한될 수 있으며, 이 경우 로컬 실행 방식을 사용하세요.
 
 ### 3. 접속
 
@@ -104,7 +109,8 @@ python -m http.server 8000
 
 - 업로드한 문서, 생성된 DB, 실험 기록은 **모두 사용자 브라우저에만** 저장됩니다(IndexedDB/localStorage).
 - 외부 서버로 전송되는 데이터는 없으며, LLM 호출도 로컬 Ollama로만 이루어집니다.
-- `OLLAMA_ORIGINS="*"` 대신 `"https://mini486ok.github.io"`처럼 특정 오리진만 허용하면 더 안전합니다.
+- CDN 라이브러리는 버전 고정 + SRI(무결성 해시) 검증으로 로드됩니다.
+- 지표 해석 참고: `입력 토큰`은 Ollama의 `prompt_eval_count`로, 동일 접두부 프롬프트는 KV 캐시 재사용으로 실제보다 작게 보고될 수 있습니다. 같은 실행 내 3개 모드의 상대 비교 용도로 활용하세요.
 
 ## 문제 해결
 

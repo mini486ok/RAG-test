@@ -93,6 +93,27 @@ export const idb = {
     return reqAsPromise(tx(db, store, 'readwrite').clear());
   },
 
+  /**
+   * 여러 스토어에 걸친 clear/delete/put을 하나의 트랜잭션으로 수행 (원자성 보장).
+   * @param {Array<{store:string, clear?:boolean, deleteKeys?:any[], put?:any[]}>} ops
+   */
+  async atomicWrite(ops) {
+    const db = await open();
+    const names = [...new Set(ops.map((o) => o.store))];
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(names, 'readwrite');
+      for (const op of ops) {
+        const s = t.objectStore(op.store);
+        if (op.clear) s.clear();
+        for (const k of op.deleteKeys || []) s.delete(k);
+        for (const v of op.put || []) s.put(v);
+      }
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error || new Error('트랜잭션 중단'));
+    });
+  },
+
   async clearAll() {
     for (const s of ['docs', 'chunks', 'nodes', 'edges', 'meta']) await this.clear(s);
   },

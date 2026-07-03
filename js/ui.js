@@ -38,9 +38,13 @@ export function makeStreamRenderer(el, intervalMs = 120) {
   const flush = () => {
     timer = null;
     lastRender = performance.now();
-    renderMarkdown(el, pending);
     const scroller = el.closest('.engine-body');
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    // 사용자가 위로 스크롤해 읽는 중이면 자동 스크롤로 방해하지 않음
+    const nearBottom = scroller
+      ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60
+      : false;
+    renderMarkdown(el, pending);
+    if (scroller && nearBottom) scroller.scrollTop = scroller.scrollHeight;
   };
 
   return {

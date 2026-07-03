@@ -379,8 +379,11 @@ export class GraphViz {
       this.draw();
     }, { passive: false });
 
-    const ro = new ResizeObserver(() => this.draw());
-    ro.observe(c);
+    if ('ResizeObserver' in window) {
+      new ResizeObserver(() => this.draw()).observe(c);
+    } else {
+      window.addEventListener('resize', () => this.draw());
+    }
   }
 
   select(node) {

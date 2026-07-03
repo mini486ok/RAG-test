@@ -50,6 +50,9 @@ async function parsePdf(file) {
   ensurePdfWorker();
   const buf = await file.arrayBuffer();
   const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+  if (pdf.numPages > 300) {
+    console.warn(`대용량 PDF (${pdf.numPages}쪽): 파싱에 시간이 걸릴 수 있습니다.`);
+  }
   const parts = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
