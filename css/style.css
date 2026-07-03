@@ -67,6 +67,9 @@ body[data-theme="light"] {
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* display 지정 요소에서도 hidden 속성이 항상 우선하도록 */
+[hidden] { display: none !important; }
+
 html { scroll-behavior: smooth; }
 
 body {
