@@ -8,8 +8,8 @@ let pdfWorkerReady = false;
 
 function ensurePdfWorker() {
   if (!pdfWorkerReady && window.pdfjsLib) {
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    // worker는 SRI 검증이 불가하므로 저장소에 동봉한 고정 버전을 same-origin으로 로드
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
     pdfWorkerReady = true;
   }
 }

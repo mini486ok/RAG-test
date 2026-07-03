@@ -39,7 +39,12 @@ function loadSettings() {
   const base = typeof structuredClone === 'function'
     ? structuredClone(DEFAULTS)
     : JSON.parse(JSON.stringify(DEFAULTS));
-  return {
+  // 저장값 손상·변조 대비: 수치 필드는 로드 시에도 클램프
+  const numOr = (v, min, max, def) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
+  };
+  const s = {
     ...base,
     ...saved,
     vector: { ...base.vector, ...(saved.vector || {}) },
@@ -47,11 +52,28 @@ function loadSettings() {
       ...base.graph,
       ...(saved.graph || {}),
       // DEFAULTS 원본 오염 방지: 배열은 반드시 새로 복사
-      entityTypes: [...(saved.graph?.entityTypes || base.graph.entityTypes)],
+      entityTypes: Array.isArray(saved.graph?.entityTypes)
+        ? saved.graph.entityTypes.filter((t) => typeof t === 'string' && t.trim()).slice(0, 30)
+        : [...base.graph.entityTypes],
     },
     seqMode: saved.seqMode !== false, // 기본: 순차 실행(공정 측정)
-    sysPrompt: saved.sysPrompt || SYSTEM_PROMPT_BASE,
+    sysPrompt: typeof saved.sysPrompt === 'string' && saved.sysPrompt.trim() ? saved.sysPrompt : SYSTEM_PROMPT_BASE,
   };
+  s.temperature = numOr(s.temperature, 0, 2, base.temperature);
+  s.numCtx = numOr(s.numCtx, 512, 131072, base.numCtx);
+  s.numPredict = numOr(s.numPredict, 64, 8192, base.numPredict);
+  s.vector.chunkSize = numOr(s.vector.chunkSize, 100, 4000, base.vector.chunkSize);
+  s.vector.overlap = numOr(s.vector.overlap, 0, 1000, base.vector.overlap);
+  s.vector.topK = numOr(s.vector.topK, 1, 20, base.vector.topK);
+  s.vector.minScore = numOr(s.vector.minScore, 0, 1, base.vector.minScore);
+  s.vector.mmrLambda = numOr(s.vector.mmrLambda, 0, 1, base.vector.mmrLambda);
+  s.graph.maxTriples = numOr(s.graph.maxTriples, 3, 30, base.graph.maxTriples);
+  s.graph.hops = numOr(s.graph.hops, 1, 3, base.graph.hops);
+  s.graph.topKEntities = numOr(s.graph.topKEntities, 1, 20, base.graph.topKEntities);
+  s.graph.maxCtxTriples = numOr(s.graph.maxCtxTriples, 5, 80, base.graph.maxCtxTriples);
+  s.graph.chunkTopK = numOr(s.graph.chunkTopK, 0, 8, base.graph.chunkTopK);
+  s.graph.gleaning = numOr(s.graph.gleaning, 0, 2, base.graph.gleaning);
+  return s;
 }
 
 function saveSettings() {
@@ -168,13 +190,19 @@ class EnginePanel {
   }
 }
 
-/** 참조 컨텍스트 아이템: 클릭/Enter/Space로 펼침 (키보드 접근성) */
+/** 참조 컨텍스트 아이템: 클릭/Enter/Space로 펼침 (키보드 접근성 + 상태 알림) */
 function bindCtxItemToggles(listEl) {
-  for (const el of listEl.querySelectorAll('.ctx-item')) {
+  const items = listEl.querySelectorAll('.ctx-item');
+  items.forEach((el, i) => {
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
-    el.setAttribute('aria-label', '참조 컨텍스트 펼치기/접기');
-    const toggle = () => el.classList.toggle('expanded');
+    el.setAttribute('aria-label', `근거 ${i + 1} 펼치기`);
+    el.setAttribute('aria-expanded', 'false');
+    const toggle = () => {
+      const expanded = el.classList.toggle('expanded');
+      el.setAttribute('aria-expanded', String(expanded));
+      el.setAttribute('aria-label', `근거 ${i + 1} ${expanded ? '접기' : '펼치기'}`);
+    };
     el.addEventListener('click', toggle);
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -182,7 +210,7 @@ function bindCtxItemToggles(listEl) {
         toggle();
       }
     });
-  }
+  });
 }
 
 // ── 초기화 ──────────────────────────────
@@ -239,7 +267,7 @@ function initTabs() {
   // 파라미터 도움말(?)을 키보드/스크린리더에서도 읽을 수 있게
   for (const h of $$('.hint')) {
     h.tabIndex = 0;
-    h.setAttribute('role', 'note');
+    h.setAttribute('role', 'button');
     h.setAttribute('aria-label', h.dataset.tip || '도움말');
   }
 }
@@ -373,6 +401,12 @@ function initQueryConsole() {
   $('#connBox').addEventListener('click', () => {
     if (!connected) showCorsModal();
   });
+  $('#connBox').addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && !connected) {
+      e.preventDefault();
+      showCorsModal();
+    }
+  });
   $('#btnRetryConn').addEventListener('click', async () => {
     hideCorsModal();
     await connect();
@@ -414,10 +448,23 @@ async function runQuery() {
       num_predict: settings.numPredict,
     };
 
+    // 질의 임베딩은 1회만 수행해 Vector/Graph가 공유 —
+    // 중복 비용 제거 + 임베딩 모델 콜드로드가 한 모드에만 전가되는 비대칭 방지
+    const shared = { qVec: null, embedMs: 0, embedError: null };
+    if (vectorStore.size || graphStore.nodeCount) {
+      try {
+        const tE = performance.now();
+        [shared.qVec] = await client.embed({ model: settings.embedModel, input: [query], signal });
+        shared.embedMs = performance.now() - tE;
+      } catch (e) {
+        shared.embedError = e;
+      }
+    }
+
     const runners = [
       () => runBasic(query, run, genOptions, signal),
-      () => runVector(query, run, genOptions, signal),
-      () => runGraph(query, run, genOptions, signal),
+      () => runVector(query, run, genOptions, signal, shared),
+      () => runGraph(query, run, genOptions, signal, shared),
     ];
 
     if (settings.seqMode) {
@@ -463,9 +510,10 @@ async function streamAnswer(panel, messages, run, genOptions, signal) {
   renderer.finish(res.text);
   panel.answer.classList.remove('streaming');
 
-  // TTFT는 모델 로드 시간을 제외해 웜/콜드 조건 차이를 보정
+  // TTFT·총시간 모두 모델 로드 시간을 제외해 웜/콜드 조건 차이를 보정
+  // (순차 실행 시 첫 모드만 콜드로드를 뒤집어쓰는 편향 방지)
   m.ttftMs = res.ttftMs != null ? Math.max(0, res.ttftMs - (res.loadDurationMs || 0)) : null;
-  m.totalMs = (m.retrievalMs || 0) + res.totalMs;
+  m.totalMs = (m.retrievalMs || 0) + Math.max(0, res.totalMs - (res.loadDurationMs || 0));
   m.promptTokens = res.promptTokens;
   m.evalTokens = res.evalTokens;
   m.tps = computeTps(res.evalTokens, res.evalDurationMs);
@@ -486,20 +534,26 @@ async function streamAnswer(panel, messages, run, genOptions, signal) {
 
 /**
  * 컨텍스트가 num_ctx 예산을 넘지 않도록 항목을 뒤에서부터 줄임.
- * 한국어 기준 보수적으로 1토큰 ≈ 2자 가정.
+ * 한국어 기준 보수적으로 1토큰 ≈ 1.6자 가정.
+ * 첫 항목조차 예산을 넘으면 truncate 콜백으로 잘라서라도 포함.
  */
-function fitContextBudget(items, itemChars, baseChars) {
+function fitContextBudget(items, itemChars, baseChars, truncate) {
   const budgetTokens = settings.numCtx - settings.numPredict - 256;
-  const budgetChars = Math.max(1000, budgetTokens * 2);
+  const budgetChars = Math.max(800, budgetTokens * 1.6);
   let total = baseChars;
   const kept = [];
   for (const it of items) {
     const len = itemChars(it);
-    if (total + len > budgetChars && kept.length) break;
+    if (total + len > budgetChars) break;
     total += len;
     kept.push(it);
   }
-  return { kept, trimmed: items.length - kept.length };
+  if (!kept.length && items.length && truncate) {
+    const maxChars = Math.max(200, Math.floor(budgetChars - baseChars - 80));
+    kept.push(truncate(items[0], maxChars));
+    return { kept, trimmed: items.length - 1, usedChars: baseChars + maxChars };
+  }
+  return { kept, trimmed: items.length - kept.length, usedChars: total };
 }
 
 function handleRunError(panel, e) {
@@ -519,13 +573,14 @@ async function runBasic(query, run, genOptions, signal) {
   try {
     panel.setSignal('work');
     panel.setEmpty('');
+    scrollPanelIntoView(panel);
     await streamAnswer(panel, buildBasicMessages(settings.sysPrompt, query), run, genOptions, signal);
   } catch (e) {
     handleRunError(panel, e);
   }
 }
 
-async function runVector(query, run, genOptions, signal) {
+async function runVector(query, run, genOptions, signal, shared) {
   const panel = panels.vector;
   const m = run.vector;
   if (!vectorStore.size) {
@@ -537,31 +592,38 @@ async function runVector(query, run, genOptions, signal) {
   try {
     panel.setSignal('work');
     panel.setEmpty('');
+    scrollPanelIntoView(panel);
     panel.setStage('RETRIEVING · 유사 청크 검색 중');
+    if (shared.embedError) throw shared.embedError;
     const t0 = performance.now();
-    const [qVec] = await client.embed({ model: settings.embedModel, input: [query], signal });
-    const results = vectorStore.search(qVec, settings.vector);
-    m.retrievalMs = performance.now() - t0;
+    const results = vectorStore.search(shared.qVec, settings.vector);
+    m.retrievalMs = shared.embedMs + (performance.now() - t0);
     panel.setMetric('retrieval', fmtMs(m.retrievalMs));
-    panel.showChunks(results.map((r) => ({ ...r.chunk, score: r.score })));
 
     if (!results.length) {
       panel.setStage('NO MATCH · 관련 청크 없음');
       toast('Vector: 유사도 임계값을 넘는 청크가 없습니다. 임계값을 낮추거나 문서를 추가하세요.', 'warn');
     }
-    let ctxChunks = results.map((r) => ({ docName: r.chunk.docName, text: r.chunk.text, score: r.score }));
-    const fit = fitContextBudget(ctxChunks, (c) => c.text.length + 60, query.length + 400);
+    let ctxChunks = results.map((r) => ({ ...r.chunk, docName: r.chunk.docName, text: r.chunk.text, score: r.score }));
+    const fit = fitContextBudget(
+      ctxChunks,
+      (c) => c.text.length + 60,
+      query.length + settings.sysPrompt.length + 400,
+      (c, n) => ({ ...c, text: c.text.slice(0, n) })
+    );
     if (fit.trimmed > 0) {
       ctxChunks = fit.kept;
       toast(`Vector: 컨텍스트 예산 초과로 청크 ${fit.trimmed}건을 제외했습니다. (num_ctx 상향 가능)`, 'info');
     }
+    // 근거 패널에는 실제로 LLM에 주입되는 청크만 표시 (표시-주입 일치)
+    panel.showChunks(ctxChunks);
     await streamAnswer(panel, buildVectorMessages(settings.sysPrompt, query, ctxChunks), run, genOptions, signal);
   } catch (e) {
     handleRunError(panel, e);
   }
 }
 
-async function runGraph(query, run, genOptions, signal) {
+async function runGraph(query, run, genOptions, signal, shared) {
   const panel = panels.graph;
   const m = run.graph;
   if (!graphStore.nodeCount) {
@@ -573,34 +635,52 @@ async function runGraph(query, run, genOptions, signal) {
   try {
     panel.setSignal('work');
     panel.setEmpty('');
+    scrollPanelIntoView(panel);
     panel.setStage('TRAVERSING · 지식그래프 탐색 중');
+    if (shared.embedError) throw shared.embedError;
     const t0 = performance.now();
-    const [qVec] = await client.embed({ model: settings.embedModel, input: [query], signal });
-    const result = graphStore.search(query, qVec, settings.graph);
-    m.retrievalMs = performance.now() - t0;
+    const result = graphStore.search(query, shared.qVec, settings.graph);
+    m.retrievalMs = shared.embedMs + (performance.now() - t0);
     panel.setMetric('retrieval', fmtMs(m.retrievalMs));
-    panel.showGraphCtx(result);
 
     if (!result.triples.length && !result.ctxChunks.length) {
       panel.setStage('NO MATCH · 관련 개체 없음');
       toast('Graph: 질의와 연결되는 개체를 찾지 못했습니다. 시드 개체 수를 늘리거나 문서를 추가하세요.', 'warn');
     }
-    // 컨텍스트 예산: 트리플 우선 유지, 원문 청크부터 축소
-    let { triples, ctxChunks } = result;
-    const tripleChars = triples.reduce((a, t) => a + t.source.length + t.target.length + t.relation.length + (t.desc?.length || 0) + 20, 0);
-    const fit = fitContextBudget(ctxChunks, (c) => c.text.length + 60, query.length + 400 + tripleChars);
-    if (fit.trimmed > 0) {
-      ctxChunks = fit.kept;
-      toast(`Graph: 컨텍스트 예산 초과로 원문 청크 ${fit.trimmed}건을 제외했습니다.`, 'info');
+    // 컨텍스트 예산: 트리플 → 원문 청크 순으로 예산을 배분해 초과분 절삭
+    const baseChars = query.length + settings.sysPrompt.length + 400;
+    const tripleLen = (t) => t.source.length + t.target.length + t.relation.length + (t.desc?.length || 0) + 20;
+    const fitT = fitContextBudget(result.triples, tripleLen, baseChars);
+    const triples = fitT.kept;
+    const fitC = fitContextBudget(
+      result.ctxChunks,
+      (c) => c.text.length + 60,
+      fitT.usedChars,
+      (c, n) => ({ ...c, text: c.text.slice(0, n) })
+    );
+    const ctxChunks = fitC.kept;
+    if (fitT.trimmed > 0 || fitC.trimmed > 0) {
+      toast(`Graph: 컨텍스트 예산 초과로 트리플 ${fitT.trimmed}건·원문 청크 ${fitC.trimmed}건을 제외했습니다.`, 'info');
     }
+    // 근거 패널에는 실제 주입분만 표시 (표시-주입 일치)
+    panel.showGraphCtx({ seeds: result.seeds, triples, ctxChunks });
     await streamAnswer(panel, buildGraphMessages(settings.sysPrompt, query, triples, ctxChunks), run, genOptions, signal);
   } catch (e) {
     handleRunError(panel, e);
   }
 }
 
+/** 순차 실행 시 좁은 화면에서 현재 실행 중 패널이 보이도록 스크롤 */
+function scrollPanelIntoView(panel) {
+  if (settings.seqMode && window.innerWidth <= 1180) {
+    panel.root.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
 // ── 오버레이 접근성 헬퍼 (포커스 이동/복원 + Tab 트랩 + ESC) ──────
-let overlayLastFocus = null;
+// 드로어·모달이 중첩될 수 있으므로 복원 지점을 오버레이별로 분리 저장
+let drawerLastFocus = null;
+let modalLastFocus = null;
 
 function trapFocus(container, e) {
   const focusables = [...container.querySelectorAll(
@@ -621,14 +701,14 @@ function trapFocus(container, e) {
 function showCorsModal() {
   const modal = $('#corsModal');
   if (!modal.hidden) return;
-  overlayLastFocus = document.activeElement;
+  modalLastFocus = document.activeElement;
   modal.hidden = false;
   $('#btnRetryConn').focus();
 }
 
 function hideCorsModal() {
   $('#corsModal').hidden = true;
-  overlayLastFocus?.focus?.();
+  modalLastFocus?.focus?.();
 }
 
 // ── 설정 드로어 ──────────────────────────────
@@ -636,7 +716,7 @@ function initDrawer() {
   const drawer = $('#drawer');
   const backdrop = $('#drawerBackdrop');
   const openDrawer = () => {
-    overlayLastFocus = document.activeElement;
+    drawerLastFocus = document.activeElement;
     drawer.hidden = false;
     backdrop.hidden = false;
     requestAnimationFrame(() => {
@@ -648,7 +728,7 @@ function initDrawer() {
     drawer.classList.remove('open');
     backdrop.hidden = true;
     setTimeout(() => (drawer.hidden = true), 300);
-    overlayLastFocus?.focus?.();
+    drawerLastFocus?.focus?.();
   };
   $('#btnSettings').addEventListener('click', openDrawer);
   $('#btnCloseDrawer').addEventListener('click', closeDrawer);
@@ -818,11 +898,16 @@ function renderEntityTags() {
 }
 
 async function handleFiles(files) {
-  if (building) {
-    toast('DB 구축 중에는 문서를 추가할 수 없습니다.', 'warn');
+  if (building || running) {
+    toast('DB 구축·질의 실행 중에는 문서를 추가할 수 없습니다.', 'warn');
     return;
   }
   for (const file of files) {
+    // 파싱 await 중에 구축이 시작되었으면 남은 파일 처리 중단 (docs 변형 레이스 방지)
+    if (building || running) {
+      toast('DB 구축·질의가 시작되어 남은 파일 추가를 중단했습니다.', 'warn');
+      break;
+    }
     if (!detectType(file.name)) {
       toast(`지원하지 않는 형식: ${file.name}`, 'warn');
       continue;
@@ -861,6 +946,10 @@ async function handleFiles(files) {
 }
 
 async function loadSampleDocs() {
+  if (building || running) {
+    toast('DB 구축·질의 실행 중에는 샘플을 추가할 수 없습니다.', 'warn');
+    return;
+  }
   const { SAMPLE_DOCS } = await import('./sample-data.js');
   let added = 0;
   for (const s of SAMPLE_DOCS) {
@@ -906,6 +995,10 @@ async function removeDocEverywhere(docId, { silent } = {}) {
     toast('DB 구축 중에는 문서를 삭제할 수 없습니다.', 'warn');
     return;
   }
+  if (running) {
+    toast('질의 실행 중에는 문서를 삭제할 수 없습니다.', 'warn');
+    return;
+  }
   const doc = docs.find((d) => d.id === docId);
   await idb.delete('docs', docId);
   await vectorStore.removeDoc(docId);
@@ -921,6 +1014,10 @@ async function removeDocEverywhere(docId, { silent } = {}) {
 async function clearAllData() {
   if (building) {
     toast('DB 구축 중에는 초기화할 수 없습니다. 먼저 구축을 중단하세요.', 'warn');
+    return;
+  }
+  if (running) {
+    toast('질의 실행 중에는 초기화할 수 없습니다. 먼저 실행을 중단하세요.', 'warn');
     return;
   }
   if (!confirm('업로드 문서와 Vector/Graph DB, 실험 기록을 모두 삭제합니다. 계속할까요?')) return;
@@ -1085,10 +1182,15 @@ function initVizTab() {
   $('#vizVectorBtn').addEventListener('click', () => switchViz('vector'));
   $('#vizGraphBtn').addEventListener('click', () => switchViz('graph'));
   $('#graphSearch').addEventListener('input', (e) => graphViz.setSearch(e.target.value));
-  $('#btnPhysics').addEventListener('click', () => {
-    const on = graphViz.toggle();
-    $('#btnPhysics').textContent = on ? '물리 시뮬레이션 ⏸' : '물리 시뮬레이션 ▶';
-  });
+  const syncPhysicsBtn = (on) => {
+    const btn = $('#btnPhysics');
+    btn.textContent = on ? '물리 시뮬레이션 ⏸' : '물리 시뮬레이션 ▶';
+    btn.setAttribute('aria-pressed', String(on));
+    btn.setAttribute('aria-label', on ? '물리 시뮬레이션 일시정지' : '물리 시뮬레이션 재생');
+  };
+  graphViz.onStateChange = syncPhysicsBtn; // 자동 안정화 정지 시에도 라벨 동기화
+  $('#btnPhysics').addEventListener('click', () => syncPhysicsBtn(graphViz.toggle()));
+  syncPhysicsBtn(false);
 }
 
 function switchViz(kind) {

@@ -37,7 +37,7 @@ export class OllamaClient {
    * idleTimeoutMs: 토큰 간 무응답이 이 시간을 넘으면 자동 중단.
    * @returns {Promise<{text, ttftMs, totalMs, promptTokens, evalTokens, evalDurationMs, loadDurationMs, aborted, incomplete}>}
    */
-  async chatStream({ model, messages, options = {}, format, onToken, signal, idleTimeoutMs = 120000 }) {
+  async chatStream({ model, messages, options = {}, format, onToken, signal, idleTimeoutMs = 120000, firstTokenTimeoutMs = 300000 }) {
     const t0 = performance.now();
     let ttftMs = null;
     let text = '';
@@ -45,17 +45,21 @@ export class OllamaClient {
     let aborted = false;
     let doneReceived = false;
     let timedOut = false;
+    let timedOutLimit = firstTokenTimeoutMs;
 
-    // 사용자 signal + 유휴 타임아웃을 결합
+    // 사용자 signal + 타임아웃 결합.
+    // 첫 응답 전에는 모델 로드·프롬프트 평가 시간이 포함되므로 더 긴 상한(firstTokenTimeoutMs)을,
+    // 스트리밍 시작 후에는 토큰 간 유휴 상한(idleTimeoutMs)을 적용.
     const ctrl = new AbortController();
     const onUserAbort = () => ctrl.abort();
     signal?.addEventListener('abort', onUserAbort, { once: true });
-    let idleTimer = idleTimeoutMs
-      ? setTimeout(() => { timedOut = true; ctrl.abort(); }, idleTimeoutMs)
+    let idleTimer = firstTokenTimeoutMs
+      ? setTimeout(() => { timedOut = true; ctrl.abort(); }, firstTokenTimeoutMs)
       : null;
     const resetIdle = () => {
-      if (!idleTimer) return;
-      clearTimeout(idleTimer);
+      if (!idleTimeoutMs) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      timedOutLimit = idleTimeoutMs;
       idleTimer = setTimeout(() => { timedOut = true; ctrl.abort(); }, idleTimeoutMs);
     };
 
@@ -124,7 +128,7 @@ export class OllamaClient {
       signal?.removeEventListener('abort', onUserAbort);
     }
 
-    if (timedOut) throw new Error(`응답이 ${Math.round(idleTimeoutMs / 1000)}초간 없어 중단했습니다. Ollama 상태를 확인하세요.`);
+    if (timedOut) throw new Error(`응답이 ${Math.round(timedOutLimit / 1000)}초간 없어 중단했습니다. Ollama 상태를 확인하세요.`);
 
     return {
       text,
@@ -138,57 +142,75 @@ export class OllamaClient {
 
   /** 비스트리밍 JSON 응답 (그래프 추출용) — timeoutMs 내 미완료 시 실패 */
   async chatJSON({ model, messages, options = {}, signal, timeoutMs = 180000 }) {
-    const res = await fetch(`${this.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false, format: 'json', options }),
-      signal: composeSignal(signal, timeoutMs),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Ollama 응답 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
+    const composed = composeSignal(signal, timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages, stream: false, format: 'json', options }),
+        signal: composed.signal,
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Ollama 응답 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      return data.message?.content || '';
+    } finally {
+      composed.cleanup();
     }
-    const data = await res.json();
-    return data.message?.content || '';
   }
 
   /** 임베딩 (input: string 배열) → Float32Array 배열 */
   async embed({ model, input, signal, timeoutMs = 120000 }) {
-    const res = await fetch(`${this.baseUrl}/api/embed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, input }),
-      signal: composeSignal(signal, timeoutMs),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`임베딩 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
+    const composed = composeSignal(signal, timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/api/embed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, input }),
+        signal: composed.signal,
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`임베딩 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      const arr = data.embeddings || [];
+      if (arr.length !== input.length) {
+        throw new Error(`임베딩 개수 불일치 (요청 ${input.length}, 응답 ${arr.length}). 임베딩 모델을 확인하세요.`);
+      }
+      return arr.map((v) => {
+        const f = new Float32Array(v);
+        normalize(f);
+        return f;
+      });
+    } finally {
+      composed.cleanup();
     }
-    const data = await res.json();
-    const arr = data.embeddings || [];
-    if (arr.length !== input.length) {
-      throw new Error(`임베딩 개수 불일치 (요청 ${input.length}, 응답 ${arr.length}). 임베딩 모델을 확인하세요.`);
-    }
-    return arr.map((v) => {
-      const f = new Float32Array(v);
-      normalize(f);
-      return f;
-    });
   }
 }
 
-/** 사용자 signal과 타임아웃을 결합한 AbortSignal */
+/**
+ * 사용자 signal과 타임아웃을 결합. 완료 시 cleanup()으로 타이머·리스너를 즉시 해제해
+ * 장시간 빌드(수백 회 호출)에서의 누적을 방지한다.
+ */
 function composeSignal(signal, timeoutMs) {
-  if (!timeoutMs) return signal;
+  if (!timeoutMs) return { signal, cleanup: () => {} };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new DOMException('시간 초과', 'TimeoutError')), timeoutMs);
-  const clean = () => clearTimeout(timer);
-  ctrl.signal.addEventListener('abort', clean, { once: true });
+  const onParentAbort = () => ctrl.abort(signal.reason);
   if (signal) {
     if (signal.aborted) ctrl.abort(signal.reason);
-    else signal.addEventListener('abort', () => ctrl.abort(signal.reason), { once: true });
+    else signal.addEventListener('abort', onParentAbort, { once: true });
   }
-  return ctrl.signal;
+  return {
+    signal: ctrl.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onParentAbort);
+    },
+  };
 }
 
 /** L2 정규화 (in-place) — 이후 코사인 = 내적 */

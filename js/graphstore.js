@@ -16,9 +16,11 @@ function normName(name) {
   return String(name).trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-// 흔한 한국어 조사(말미) — 기존 노드가 있을 때만 병합에 사용하는 보수적 휴리스틱
-const PARTICLES_2 = ['으로', '에서', '부터', '까지', '에게', '이다'];
-const PARTICLES_1 = ['은', '는', '이', '가', '을', '를', '의', '와', '과', '도', '로', '에'];
+// 흔한 한국어 조사(말미) — 기존 노드가 있을 때만 병합에 사용하는 보수적 휴리스틱.
+// 1자 조사는 오병합 위험이 낮은 것만 유지 ('과/로/이/가' 등은 복합명사·부서명의
+// 마지막 음절과 충돌: 신호과, 전차선로, 전기 등 → 제외)
+const PARTICLES_2 = ['으로', '에서', '부터', '까지', '에게'];
+const PARTICLES_1 = ['은', '는', '을', '를'];
 
 /** 개체명 키 결정: 정확 일치 → 조사 제거 형태가 이미 존재하면 그 키로 병합 */
 function resolveKey(state, rawName) {
@@ -157,19 +159,24 @@ export class GraphStore {
     this.nodes = new Map(); // normName → node
     this.edges = new Map(); // edgeKey → edge
     this.chunkTexts = new Map(); // chunkId → {text, docName}
+    this.embedModel = null;
+    this.dim = 0;
   }
 
   async load() {
-    const [nodes, edges, meta] = await Promise.all([
+    const [nodes, edges, meta, builtMeta] = await Promise.all([
       idb.getAll('nodes'),
       idb.getAll('edges'),
       idb.get('meta', 'graphChunks'),
+      idb.get('meta', 'graphBuiltAt'),
     ]);
     this.nodes = new Map(
       nodes.map((n) => [normName(n.name), { ...n, vec: n.vec ? (n.vec instanceof Float32Array ? n.vec : new Float32Array(n.vec)) : null }])
     );
     this.edges = new Map(edges.map((e) => [e.id, e]));
     this.chunkTexts = new Map(Object.entries(meta?.value || {}));
+    this.embedModel = builtMeta?.model || null;
+    this.dim = builtMeta?.dim || [...this.nodes.values()].find((n) => n.vec)?.vec.length || 0;
   }
 
   get nodeCount() { return this.nodes.size; }
@@ -213,7 +220,7 @@ export class GraphStore {
           signal,
         });
         const ext = parseExtraction(raw);
-        if (!ext.entities.length && !ext.relations.length) failed++;
+        let gotAny = ext.entities.length > 0 || ext.relations.length > 0;
         mergeInto(work, ext, unit, params.entityTypes);
 
         // gleaning: 추가 추출 반복
@@ -225,8 +232,11 @@ export class GraphStore {
             options: { temperature: 0.1, num_ctx: models.numCtx, num_predict: 1200 },
             signal,
           });
-          mergeInto(work, parseExtraction(gRaw), unit, params.entityTypes);
+          const gExt = parseExtraction(gRaw);
+          if (gExt.entities.length || gExt.relations.length) gotAny = true;
+          mergeInto(work, gExt, unit, params.entityTypes);
         }
+        if (!gotAny) failed++;
       } catch (e) {
         if (e.name === 'AbortError') throw e;
         failed++;
@@ -251,17 +261,20 @@ export class GraphStore {
     }
 
     // 4) 원자적 저장 성공 후에만 메모리 상태 교체
-    await persistState(work);
+    const dim = [...work.nodes.values()].find((n) => n.vec)?.vec.length || 0;
+    await persistState(work, { model: models.embedModel, dim });
     this.nodes = work.nodes;
     this.edges = work.edges;
     this.chunkTexts = work.chunkTexts;
+    this.embedModel = models.embedModel;
+    this.dim = dim;
     return { nodes: this.nodes.size, edges: this.edges.size, failed };
   }
 
   async removeDoc(docId) {
     const work = cloneState(this);
     removeDocFromState(work, docId);
-    await persistState(work);
+    await persistState(work, { model: this.embedModel, dim: this.dim });
     this.nodes = work.nodes;
     this.edges = work.edges;
     this.chunkTexts = work.chunkTexts;
@@ -276,6 +289,8 @@ export class GraphStore {
     this.nodes.clear();
     this.edges.clear();
     this.chunkTexts.clear();
+    this.embedModel = null;
+    this.dim = 0;
   }
 
   /**
@@ -284,6 +299,9 @@ export class GraphStore {
    */
   search(query, queryVec, { topKEntities = 6, hops = 2, maxCtxTriples = 30, chunkTopK = 2 } = {}) {
     if (!this.nodes.size) return { triples: [], seeds: [], ctxChunks: [] };
+    if (queryVec && this.dim && queryVec.length !== this.dim) {
+      throw new Error(`임베딩 차원 불일치 (Graph DB ${this.dim} vs 질의 ${queryVec.length}). 임베딩 모델이 바뀌었으면 Graph DB를 다시 구축하세요.`);
+    }
     const qExpanded = expandQuery(query);
 
     // 1) 시드 개체 점수: 임베딩 유사도 + 어휘/별칭 포함 부스트
@@ -405,7 +423,7 @@ export class GraphStore {
 }
 
 /** 상태를 IndexedDB에 원자적으로 기록 */
-async function persistState(state) {
+async function persistState(state, embedMeta = {}) {
   await idb.atomicWrite([
     { store: 'nodes', clear: true, put: [...state.nodes.values()] },
     { store: 'edges', clear: true, put: [...state.edges.values()] },
@@ -413,7 +431,7 @@ async function persistState(state) {
       store: 'meta',
       put: [
         { key: 'graphChunks', value: Object.fromEntries(state.chunkTexts) },
-        { key: 'graphBuiltAt', value: Date.now() },
+        { key: 'graphBuiltAt', value: Date.now(), model: embedMeta.model || null, dim: embedMeta.dim || 0 },
       ],
     },
   ]);

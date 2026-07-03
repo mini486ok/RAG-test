@@ -35,10 +35,10 @@
   </div>
 
   <div class="topbar-controls">
-    <div class="build-chip" id="globalBuildChip" hidden role="status"><span class="build-chip-spin" aria-hidden="true"></span><span id="globalBuildText"></span></div>
-    <div class="conn-box" id="connBox" role="status" aria-live="polite">
+    <div class="build-chip" id="globalBuildChip" hidden><span class="build-chip-spin" aria-hidden="true"></span><span id="globalBuildText"></span></div>
+    <div class="conn-box" id="connBox" role="button" tabindex="0" aria-label="Ollama 연결 상태 — 실패 시 클릭하여 연결 안내 열기">
       <span class="conn-dot" id="connDot" aria-hidden="true"></span>
-      <span class="conn-text" id="connText">Ollama 연결 확인 중…</span>
+      <span class="conn-text" id="connText" role="status" aria-live="polite">Ollama 연결 확인 중…</span>
     </div>
     <label class="model-quick">
       <span class="model-quick-label">응답 모델</span>
@@ -372,7 +372,7 @@
       <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.3">
     </label>
     <label class="d-field">
-      <span>컨텍스트 윈도(num_ctx) <small>RAG 컨텍스트가 잘리지 않도록 충분히</small></span>
+      <span>컨텍스트 윈도우(num_ctx) <small>RAG 컨텍스트가 잘리지 않도록 충분히</small></span>
       <input type="number" id="numCtx" min="2048" max="32768" step="1024" value="8192">
     </label>
     <label class="d-field">

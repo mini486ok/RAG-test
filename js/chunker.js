@@ -14,7 +14,8 @@ export function splitSentences(text) {
     // 마침표/물음표/느낌표+공백, "다." 종결, 줄바꿈 기준 (lookbehind 미사용 — Safari 구버전 호환)
     const marked = p
       .replace(/([.!?。])\s+/g, '$1\u0000')
-      .replace(/(다\.)(?![\d)])\s*/g, '$1\u0000');
+      // "다." 종결은 뒤가 공백일 때만 분리 (말줄임표 등 연속 구두점 오분리 방지)
+      .replace(/(다\.)(?=\s)/g, '$1\u0000');
     const pieces = marked.split(/\u0000|\n/);
     for (const s of pieces) {
       const t = s.trim();

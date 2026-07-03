@@ -168,10 +168,15 @@ export class VectorViz {
       this.scheduleDraw();
     }, { passive: false });
 
+    const onResize = () => {
+      // 캔버스 크기가 바뀌면 투영 좌표계를 새 크기에 다시 맞춤
+      this.fit();
+      this.scheduleDraw();
+    };
     if ('ResizeObserver' in window) {
-      new ResizeObserver(() => this.scheduleDraw()).observe(c);
+      new ResizeObserver(onResize).observe(c);
     } else {
-      window.addEventListener('resize', () => this.scheduleDraw());
+      window.addEventListener('resize', onResize);
     }
   }
 

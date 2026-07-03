@@ -98,12 +98,14 @@ export class GraphViz {
     this.alpha = 1;
     if (!this.running) {
       this.running = true;
+      this.onStateChange?.(true);
       this.loop();
     }
   }
 
   stop() {
     this.running = false;
+    this.onStateChange?.(false);
   }
 
   toggle() {
@@ -121,6 +123,7 @@ export class GraphViz {
     if (this.alpha < 0.003) {
       this.running = false;
       this.draw();
+      this.onStateChange?.(false); // 자동 안정화 정지를 UI에 알림
       return;
     }
     requestAnimationFrame(() => this.loop());
@@ -379,10 +382,24 @@ export class GraphViz {
       this.draw();
     }, { passive: false });
 
+    const onResize = () => {
+      // 리사이즈 시 중심이 화면 밖으로 밀리지 않도록 크기 변화량만큼 offset 보정
+      const { w, h } = this.cssSize();
+      if (this._lastW != null) {
+        this.offsetX += (w - this._lastW) / 2;
+        this.offsetY += (h - this._lastH) / 2;
+      }
+      this._lastW = w;
+      this._lastH = h;
+      this.draw();
+    };
+    const { w, h } = this.cssSize();
+    this._lastW = w;
+    this._lastH = h;
     if ('ResizeObserver' in window) {
-      new ResizeObserver(() => this.draw()).observe(c);
+      new ResizeObserver(onResize).observe(c);
     } else {
-      window.addEventListener('resize', () => this.draw());
+      window.addEventListener('resize', onResize);
     }
   }
 
