@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAIL·RAG LAB — 철도교통 특화 RAG 비교 관제실</title>
+<meta name="description" content="철도교통 특화 AI를 위한 Basic LLM / Vector RAG / Graph RAG 실시간 비교 실험실. 로컬 Ollama 기반.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚄</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=IBM+Plex+Sans+KR:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<!-- 외부 라이브러리 (고정 버전) -->
+<script defer src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body data-theme="dark">
+
+<!-- ══════════════ 헤더: 관제 상단부 ══════════════ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <span class="rail-line"></span>
+      <span class="station-dot dot-basic"></span>
+      <span class="station-dot dot-vector"></span>
+      <span class="station-dot dot-graph"></span>
+    </div>
+    <div class="brand-text">
+      <h1>RAIL·RAG <em>LAB</em></h1>
+      <p class="brand-sub">철도교통 특화 RAG 비교 관제실</p>
+    </div>
+  </div>
+
+  <div class="topbar-controls">
+    <div class="conn-box" id="connBox" role="status" aria-live="polite">
+      <span class="conn-dot" id="connDot" aria-hidden="true"></span>
+      <span class="conn-text" id="connText">Ollama 연결 확인 중…</span>
+    </div>
+    <label class="model-quick">
+      <span class="model-quick-label">응답 모델</span>
+      <select id="chatModel" aria-label="응답 생성 모델 선택"></select>
+    </label>
+    <button class="icon-btn" id="themeToggle" title="테마 전환" aria-label="라이트/다크 테마 전환">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <button class="icon-btn" id="btnSettings" title="상세 설정" aria-label="상세 설정 열기">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ══════════════ 탭 내비게이션 ══════════════ -->
+<nav class="tabnav" role="tablist" aria-label="주요 화면">
+  <button class="tab-btn active" data-tab="lab" role="tab" aria-selected="true" id="tabbtn-lab">
+    <span class="tab-num">01</span>비교 실험
+  </button>
+  <button class="tab-btn" data-tab="build" role="tab" aria-selected="false" id="tabbtn-build">
+    <span class="tab-num">02</span>문서 · DB 구축
+  </button>
+  <button class="tab-btn" data-tab="viz" role="tab" aria-selected="false" id="tabbtn-viz">
+    <span class="tab-num">03</span>DB 시각화
+  </button>
+  <div class="tabnav-rail" aria-hidden="true"></div>
+</nav>
+
+<main>
+<!-- ══════════════ 탭 1 : 비교 실험 ══════════════ -->
+<section class="tab-panel active" id="tab-lab" role="tabpanel" aria-labelledby="tabbtn-lab">
+
+  <div class="query-console">
+    <div class="query-head">
+      <span class="console-label">QUERY CONSOLE</span>
+      <span class="db-badges">
+        <span class="db-badge" id="badgeVectorDb">Vector DB <b id="badgeVectorCount">0</b> 청크</span>
+        <span class="db-badge" id="badgeGraphDb">Graph DB <b id="badgeGraphCount">0</b> 노드</span>
+      </span>
+    </div>
+    <div class="query-row">
+      <textarea id="queryInput" rows="2" placeholder="철도교통 관련 질문을 입력하세요… (Enter 실행 / Shift+Enter 줄바꿈)" aria-label="질의 입력"></textarea>
+      <div class="query-actions">
+        <button class="btn-primary" id="btnRun">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          실행
+        </button>
+        <button class="btn-ghost" id="btnStop" disabled>중단</button>
+      </div>
+    </div>
+    <div class="example-chips" id="exampleChips" aria-label="예시 질문"></div>
+  </div>
+
+  <!-- 3-way 엔진 패널 -->
+  <div class="engine-grid" id="engineGrid">
+    <!-- 패널은 JS에서 templete 복제로 생성 -->
+  </div>
+
+  <template id="enginePanelTpl">
+    <article class="engine-panel">
+      <header class="engine-head">
+        <div class="engine-title-box">
+          <span class="engine-line" aria-hidden="true"></span>
+          <div>
+            <h2 class="engine-name"></h2>
+            <p class="engine-desc"></p>
+          </div>
+        </div>
+        <div class="signal-box" role="status">
+          <span class="sig sig-red" title="대기"></span>
+          <span class="sig sig-amber" title="처리 중"></span>
+          <span class="sig sig-green" title="완료"></span>
+        </div>
+      </header>
+      <div class="engine-stage" aria-live="off"></div>
+      <div class="engine-body">
+        <div class="answer md-body" aria-label="응답"></div>
+        <div class="engine-empty"></div>
+      </div>
+      <details class="ctx-details">
+        <summary>참조 컨텍스트 <span class="ctx-count"></span></summary>
+        <div class="ctx-list"></div>
+      </details>
+      <footer class="metric-strip">
+        <div class="metric"><span class="m-label">검색</span><span class="m-value" data-m="retrieval">–</span></div>
+        <div class="metric"><span class="m-label">첫 토큰</span><span class="m-value" data-m="ttft">–</span></div>
+        <div class="metric"><span class="m-label">총 시간</span><span class="m-value" data-m="total">–</span></div>
+        <div class="metric"><span class="m-label">입력 토큰</span><span class="m-value" data-m="ptok">–</span></div>
+        <div class="metric"><span class="m-label">생성 토큰</span><span class="m-value" data-m="etok">–</span></div>
+        <div class="metric"><span class="m-label">생성 속도</span><span class="m-value" data-m="tps">–</span></div>
+      </footer>
+    </article>
+  </template>
+
+  <!-- 성능 비교 차트 -->
+  <div class="compare-section" id="compareSection" hidden>
+    <h3 class="section-title"><span class="title-tick"></span>성능 계기판 <small>PERFORMANCE GAUGES</small></h3>
+    <div class="chart-grid" id="chartGrid"></div>
+  </div>
+
+  <!-- 실험 기록 -->
+  <details class="history-section" id="historySection" hidden>
+    <summary><span class="title-tick"></span>실험 기록 <small id="historyCount"></small></summary>
+    <div class="table-wrap">
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>시각</th><th>질문</th><th>모델</th>
+            <th colspan="2">Basic</th><th colspan="2">Vector</th><th colspan="2">Graph</th>
+          </tr>
+          <tr class="sub-head">
+            <th></th><th></th><th></th>
+            <th>총시간</th><th>토큰</th><th>총시간</th><th>토큰</th><th>총시간</th><th>토큰</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </div>
+    <button class="btn-ghost btn-sm" id="btnClearHistory">기록 지우기</button>
+  </details>
+</section>
+
+<!-- ══════════════ 탭 2 : 문서 · DB 구축 ══════════════ -->
+<section class="tab-panel" id="tab-build" role="tabpanel" aria-labelledby="tabbtn-build">
+
+  <div class="build-grid">
+    <!-- 좌: 문서 관리 -->
+    <div class="build-col">
+      <h3 class="section-title"><span class="title-tick"></span>지식 문서 <small>KNOWLEDGE SOURCES</small></h3>
+
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="문서 업로드: 클릭 또는 드래그 앤 드롭">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <p><b>문서를 끌어다 놓거나 클릭하여 업로드</b></p>
+        <p class="dz-sub">PDF · DOCX · PPTX · HWPX · MD · TXT 지원</p>
+        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.pptx,.hwpx,.md,.markdown,.txt" hidden>
+      </div>
+
+      <div class="doclist-head">
+        <span>업로드된 문서 <b id="docCount">0</b>건</span>
+        <button class="btn-ghost btn-sm" id="btnLoadSample">🚄 철도 샘플 문서 로드</button>
+      </div>
+      <ul class="doc-list" id="docList"></ul>
+
+      <div class="db-status-cards">
+        <div class="db-card db-card-vector">
+          <h4>VECTOR DB</h4>
+          <div class="db-stats">
+            <div><b id="vStatChunks">0</b><span>청크</span></div>
+            <div><b id="vStatDim">–</b><span>차원</span></div>
+            <div><b id="vStatDocs">0</b><span>문서</span></div>
+          </div>
+          <p class="db-built-at" id="vBuiltAt"></p>
+        </div>
+        <div class="db-card db-card-graph">
+          <h4>GRAPH DB</h4>
+          <div class="db-stats">
+            <div><b id="gStatNodes">0</b><span>노드</span></div>
+            <div><b id="gStatEdges">0</b><span>관계</span></div>
+            <div><b id="gStatTypes">0</b><span>유형</span></div>
+          </div>
+          <p class="db-built-at" id="gBuiltAt"></p>
+        </div>
+      </div>
+      <button class="btn-danger btn-sm" id="btnClearAll">전체 데이터 초기화</button>
+    </div>
+
+    <!-- 우: 파라미터 + 구축 -->
+    <div class="build-col">
+      <h3 class="section-title"><span class="title-tick"></span>구축 파라미터 <small>BUILD PARAMETERS</small></h3>
+
+      <div class="param-card param-vector">
+        <header><span class="engine-line line-vector"></span><h4>Vector DB 파라미터</h4></header>
+        <div class="param-grid">
+          <label class="param">
+            <span class="p-name">청크 크기 <i class="hint" data-tip="하나의 청크(검색 단위)에 담을 최대 글자 수. 너무 크면 검색 정밀도가, 너무 작으면 문맥이 떨어집니다. 한국어 문서는 500~800자가 일반적입니다.">?</i></span>
+            <input type="number" id="vChunkSize" min="100" max="4000" step="50" value="600">
+            <span class="p-unit">자</span>
+          </label>
+          <label class="param">
+            <span class="p-name">청크 중첩 <i class="hint" data-tip="인접 청크 간 겹치는 글자 수. 문장이 경계에서 잘리는 것을 완화합니다. 보통 청크 크기의 10~20%.">?</i></span>
+            <input type="number" id="vOverlap" min="0" max="1000" step="10" value="90">
+            <span class="p-unit">자</span>
+          </label>
+          <label class="param">
+            <span class="p-name">Top-K <i class="hint" data-tip="질의와 유사한 상위 몇 개 청크를 컨텍스트로 사용할지. 일반적으로 3~5.">?</i></span>
+            <input type="number" id="vTopK" min="1" max="20" value="4">
+            <span class="p-unit">개</span>
+          </label>
+          <label class="param">
+            <span class="p-name">유사도 임계값 <i class="hint" data-tip="이 코사인 유사도 미만의 청크는 컨텍스트에서 제외합니다. 0이면 제한 없음.">?</i></span>
+            <input type="number" id="vMinScore" min="0" max="1" step="0.05" value="0.3">
+          </label>
+          <label class="param param-check">
+            <span class="p-name">MMR 재순위화 <i class="hint" data-tip="Maximal Marginal Relevance. 유사하면서도 서로 중복되지 않는 다양한 청크를 선택합니다.">?</i></span>
+            <input type="checkbox" id="vMmr" checked>
+          </label>
+          <label class="param">
+            <span class="p-name">MMR λ <i class="hint" data-tip="1에 가까울수록 관련성 위주, 0에 가까울수록 다양성 위주. 보통 0.5~0.7.">?</i></span>
+            <input type="number" id="vMmrLambda" min="0" max="1" step="0.05" value="0.6">
+          </label>
+          <label class="param param-wide">
+            <span class="p-name">임베딩 모델 <i class="hint" data-tip="청크와 질의를 벡터로 변환하는 모델. 다국어 검색에는 bge-m3가 우수합니다.">?</i></span>
+            <select id="embedModel"></select>
+          </label>
+        </div>
+        <button class="btn-build btn-build-vector" id="btnBuildVector">Vector DB 구축</button>
+        <div class="progress-box" id="vProgressBox" hidden>
+          <div class="progress-track"><div class="progress-fill fill-vector" id="vProgressFill"></div></div>
+          <span class="progress-text" id="vProgressText"></span>
+        </div>
+      </div>
+
+      <div class="param-card param-graph">
+        <header><span class="engine-line line-graph"></span><h4>Graph DB 파라미터</h4></header>
+        <div class="param-grid">
+          <label class="param">
+            <span class="p-name">청크당 최대 트리플 <i class="hint" data-tip="한 청크에서 추출할 (개체-관계-개체) 트리플의 최대 개수. 많을수록 그래프가 촘촘해지지만 구축이 느려집니다.">?</i></span>
+            <input type="number" id="gMaxTriples" min="3" max="30" value="12">
+            <span class="p-unit">개</span>
+          </label>
+          <label class="param">
+            <span class="p-name">탐색 깊이(Hop) <i class="hint" data-tip="질의 개체에서 몇 단계 떨어진 이웃까지 그래프를 탐색할지. 보통 1~2.">?</i></span>
+            <input type="number" id="gHops" min="1" max="3" value="2">
+            <span class="p-unit">홉</span>
+          </label>
+          <label class="param">
+            <span class="p-name">시드 개체 수 <i class="hint" data-tip="질의와 의미가 가까운 상위 개체 몇 개에서 탐색을 시작할지.">?</i></span>
+            <input type="number" id="gTopKEntities" min="1" max="20" value="6">
+            <span class="p-unit">개</span>
+          </label>
+          <label class="param">
+            <span class="p-name">컨텍스트 트리플 <i class="hint" data-tip="LLM에 전달할 지식그래프 트리플의 최대 개수.">?</i></span>
+            <input type="number" id="gMaxCtxTriples" min="5" max="80" value="30">
+            <span class="p-unit">개</span>
+          </label>
+          <label class="param">
+            <span class="p-name">연계 청크 수 <i class="hint" data-tip="시드 개체가 등장한 원문 청크를 몇 개까지 함께 전달할지.">?</i></span>
+            <input type="number" id="gChunkTopK" min="0" max="8" value="2">
+            <span class="p-unit">개</span>
+          </label>
+          <label class="param">
+            <span class="p-name">추출 보강(Gleaning) <i class="hint" data-tip="누락된 개체를 찾기 위해 추출을 추가로 반복하는 횟수. 품질↑ 속도↓.">?</i></span>
+            <input type="number" id="gGleaning" min="0" max="2" value="0">
+            <span class="p-unit">회</span>
+          </label>
+          <label class="param param-wide">
+            <span class="p-name">개체 유형 <i class="hint" data-tip="지식그래프의 노드 분류 체계입니다. 철도 도메인에 맞게 수정할 수 있습니다.">?</i></span>
+            <div class="tag-editor" id="gEntityTypes"></div>
+          </label>
+        </div>
+        <button class="btn-build btn-build-graph" id="btnBuildGraph">Graph DB 구축</button>
+        <div class="progress-box" id="gProgressBox" hidden>
+          <div class="progress-track"><div class="progress-fill fill-graph" id="gProgressFill"></div></div>
+          <span class="progress-text" id="gProgressText"></span>
+        </div>
+        <p class="param-note">⚠ Graph 구축은 청크마다 LLM 추출을 수행하므로 수 분이 걸릴 수 있습니다.</p>
+      </div>
+
+      <div class="build-actions">
+        <button class="btn-primary" id="btnBuildAll">전체 구축 (Vector + Graph)</button>
+        <button class="btn-ghost" id="btnCancelBuild" hidden>구축 중단</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ 탭 3 : DB 시각화 ══════════════ -->
+<section class="tab-panel" id="tab-viz" role="tabpanel" aria-labelledby="tabbtn-viz">
+  <div class="viz-switch" role="tablist" aria-label="시각화 종류">
+    <button class="viz-btn active" id="vizVectorBtn" role="tab" aria-selected="true">
+      <span class="engine-line line-vector"></span>Vector 임베딩 지도
+    </button>
+    <button class="viz-btn" id="vizGraphBtn" role="tab" aria-selected="false">
+      <span class="engine-line line-graph"></span>지식그래프 네트워크
+    </button>
+  </div>
+
+  <div class="viz-stage" id="vizVectorStage">
+    <div class="viz-toolbar">
+      <span class="viz-info" id="vectorVizInfo">Vector DB가 비어 있습니다.</span>
+      <div class="viz-legend" id="vectorLegend"></div>
+    </div>
+    <div class="viz-canvas-wrap">
+      <canvas id="vectorCanvas" aria-label="임베딩 2차원 산점도"></canvas>
+      <div class="viz-tooltip" id="vectorTooltip" hidden></div>
+      <div class="viz-empty" id="vectorVizEmpty">
+        <p>임베딩 산점도가 여기에 표시됩니다.<br>문서를 업로드하고 Vector DB를 구축해 보세요.</p>
+      </div>
+    </div>
+    <p class="viz-caption">각 점은 하나의 청크입니다. 고차원 임베딩을 PCA로 2차원에 투영했으며, 색상은 출처 문서를 나타냅니다. 가까운 점일수록 의미가 유사합니다.</p>
+  </div>
+
+  <div class="viz-stage" id="vizGraphStage" hidden>
+    <div class="viz-toolbar">
+      <span class="viz-info" id="graphVizInfo">Graph DB가 비어 있습니다.</span>
+      <input type="search" id="graphSearch" placeholder="개체 검색…" aria-label="개체 검색">
+      <button class="btn-ghost btn-sm" id="btnPhysics">물리 시뮬레이션 ⏸</button>
+      <div class="viz-legend" id="graphLegend"></div>
+    </div>
+    <div class="viz-canvas-wrap">
+      <canvas id="graphCanvas" aria-label="지식그래프 네트워크 다이어그램"></canvas>
+      <div class="viz-tooltip" id="graphTooltip" hidden></div>
+      <div class="node-detail" id="nodeDetail" hidden></div>
+      <div class="viz-empty" id="graphVizEmpty">
+        <p>지식그래프가 여기에 표시됩니다.<br>문서를 업로드하고 Graph DB를 구축해 보세요.</p>
+      </div>
+    </div>
+    <p class="viz-caption">노드는 추출된 개체, 연결선은 관계입니다. 드래그로 이동, 휠로 확대/축소, 노드 클릭으로 상세 정보를 볼 수 있습니다.</p>
+  </div>
+</section>
+</main>
+
+<!-- ══════════════ 설정 드로어 ══════════════ -->
+<aside class="drawer" id="drawer" aria-label="상세 설정" hidden>
+  <div class="drawer-head">
+    <h3>상세 설정</h3>
+    <button class="icon-btn" id="btnCloseDrawer" aria-label="설정 닫기">✕</button>
+  </div>
+  <div class="drawer-body">
+    <label class="d-field">
+      <span>Ollama 서버 주소</span>
+      <input type="text" id="ollamaUrl" value="http://localhost:11434" spellcheck="false">
+    </label>
+    <button class="btn-primary btn-sm" id="btnReconnect">다시 연결</button>
+    <hr>
+    <label class="d-field">
+      <span>Temperature <small>낮을수록 사실 위주(권장 0.2~0.4)</small></span>
+      <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.3">
+    </label>
+    <label class="d-field">
+      <span>컨텍스트 윈도(num_ctx) <small>RAG 컨텍스트가 잘리지 않도록 충분히</small></span>
+      <input type="number" id="numCtx" min="2048" max="32768" step="1024" value="8192">
+    </label>
+    <label class="d-field">
+      <span>최대 응답 토큰(num_predict)</span>
+      <input type="number" id="numPredict" min="128" max="4096" step="128" value="1024">
+    </label>
+    <label class="d-field">
+      <span>시스템 프롬프트</span>
+      <textarea id="sysPrompt" rows="5"></textarea>
+    </label>
+    <hr>
+    <p class="d-note" id="drawerInfo"></p>
+  </div>
+</aside>
+<div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+
+<!-- ══════════════ 연결 안내 모달 ══════════════ -->
+<div class="modal-backdrop" id="corsModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="corsTitle">
+    <h3 id="corsTitle">🔌 Ollama 서버에 연결할 수 없습니다</h3>
+    <div class="modal-body">
+      <p>이 페이지는 <b>브라우저에서 직접</b> 로컬 Ollama에 접속합니다. 아래를 확인해 주세요.</p>
+      <ol>
+        <li><b>Ollama 실행 확인</b> — 터미널에서 <code>ollama list</code>가 동작해야 합니다.</li>
+        <li><b>CORS 허용 설정</b> — 웹페이지(https)에서 접속하려면 환경변수 설정이 필요합니다.
+          <div class="code-block">
+            <p class="code-label">Windows (PowerShell — 설정 후 Ollama 재시작)</p>
+            <pre><code>setx OLLAMA_ORIGINS "*"</code></pre>
+            <p class="code-label">macOS</p>
+            <pre><code>launchctl setenv OLLAMA_ORIGINS "*"</code></pre>
+            <p class="code-label">Linux (systemd)</p>
+            <pre><code>sudo systemctl edit ollama.service
+# [Service] 섹션에 추가:
+Environment="OLLAMA_ORIGINS=*"</code></pre>
+          </div>
+          <p class="modal-note">설정 후 <b>Ollama를 완전히 종료했다가 다시 실행</b>해야 적용됩니다. (Windows: 트레이 아이콘 우클릭 → Quit)</p>
+        </li>
+        <li><b>브라우저</b> — Chrome/Edge 최신 버전 권장. 사설망 접근 차단 메시지가 뜨면 허용을 선택하세요.</li>
+      </ol>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-primary" id="btnRetryConn">다시 연결 시도</button>
+      <button class="btn-ghost" id="btnCloseCors">닫기</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toasts" aria-live="polite"></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
