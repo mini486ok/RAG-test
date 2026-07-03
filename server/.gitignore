@@ -1,3 +1,4 @@
 # 계정·사용량 파일은 절대 커밋하지 않음
 accounts.json
 usage.json
+tunnel.log
