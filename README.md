@@ -81,6 +81,47 @@ python -m http.server 8000
 > `file://`로 직접 열면 ES 모듈 제약으로 동작하지 않습니다. 반드시 HTTP 서버로 서빙하세요.
 > Windows는 동봉된 `start.bat`을 더블클릭해도 됩니다.
 
+## 다른 PC에서 사용하기 (원격 공유 모드)
+
+기본 설계는 "방문자가 각자 자기 PC의 Ollama를 사용"하는 방식이지만, **한 대의 호스트 PC가 LLM을 제공하고 다른 PC 사용자들이 로그인해서 쓰는 공유 모드**도 지원합니다.
+
+### 호스트(LLM 제공자) 설정 — 3단계
+
+```powershell
+cd server
+
+# 1) 사용자 계정 생성 (비밀번호 입력 프롬프트, 일일 호출 한도 지정 가능)
+python auth_proxy.py add-user alice --limit 200
+
+# 2) 인증 프록시 실행 (Ollama 앞단, 포트 8790)
+python auth_proxy.py serve        # 또는 start_server.bat 더블클릭
+
+# 3) 외부 공개 터널 실행 (별도 창)
+cloudflared tunnel --url http://localhost:8790   # 또는 start_tunnel.bat
+```
+
+터널이 발급한 주소(`https://xxxx.trycloudflare.com`)를 아래 형식으로 공유하세요:
+
+```
+https://mini486ok.github.io/RAG-test/?server=https://xxxx.trycloudflare.com
+```
+
+### 사용자(다른 PC) 이용 방법
+
+공유받은 링크로 접속하면 **로그인 창**이 뜹니다. 발급받은 아이디/비밀번호로 로그인하면 Ollama 설치 없이 바로 사용할 수 있습니다. (문서/DB는 각자 브라우저에 저장되므로 사용자별로 독립적입니다.)
+
+### 남용 방지 장치
+
+| 장치 | 내용 |
+|---|---|
+| 서버 측 인증 | 아이디/비밀번호(Basic Auth)를 **프록시 서버에서** 검증 — 정적 페이지 JS 검사와 달리 우회 불가 |
+| 일일 호출 한도 | 계정별 LLM 호출(`/api/chat`, `/api/embed`) 횟수 제한, 초과 시 429 반환 (`--limit`로 조정) |
+| 무차별 대입 차단 | IP당 인증 10회 실패 시 10분 차단 |
+| 경로 제한 | 모델 조회·대화·임베딩 외 API(모델 삭제/다운로드 등)는 전부 차단 |
+| 사용량 확인 | `python auth_proxy.py list`로 계정별 오늘 사용량 조회 |
+
+> **보안 참고**: GitHub Pages는 정적 호스팅이라 페이지 자체는 누구나 열 수 있습니다. 실제 보호 대상인 LLM 호출은 전부 프록시의 서버 측 인증·쿼터를 통과해야 하므로, 페이지가 공개여도 호스트 PC의 자원은 로그인 없이는 사용할 수 없습니다. 비밀번호는 accounts.json에 salt+SHA-256 해시로만 저장됩니다. 고정 주소가 필요하면 Cloudflare 계정으로 Named Tunnel을 만들면 됩니다.
+
 ## 아키텍처
 
 ```

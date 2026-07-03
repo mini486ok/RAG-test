@@ -362,10 +362,14 @@
   </div>
   <div class="drawer-body">
     <label class="d-field">
-      <span>Ollama 서버 주소</span>
+      <span>Ollama 서버 주소 <small>로컬 또는 인증 프록시(원격) 주소</small></span>
       <input type="text" id="ollamaUrl" value="http://localhost:11434" spellcheck="false">
     </label>
     <button class="btn-primary btn-sm" id="btnReconnect">다시 연결</button>
+    <div class="auth-status" id="authStatus" hidden>
+      <span id="authUserText"></span>
+      <button class="btn-ghost btn-sm" id="btnLogout">로그아웃</button>
+    </div>
     <hr>
     <label class="d-field">
       <span>Temperature <small>낮을수록 사실 위주(권장 0.2~0.4)</small></span>
@@ -419,6 +423,32 @@ Environment="OLLAMA_ORIGINS=https://mini486ok.github.io"</code></pre>
       <button class="btn-primary" id="btnRetryConn">다시 연결 시도</button>
       <button class="btn-ghost" id="btnCloseCors">닫기</button>
     </div>
+  </div>
+</div>
+
+<!-- ══════════════ 로그인 모달 (원격 공유 서버용) ══════════════ -->
+<div class="modal-backdrop" id="loginModal" hidden>
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+    <h3 id="loginTitle">🔐 서비스 로그인</h3>
+    <div class="modal-body">
+      <p>이 LLM 서버는 승인된 사용자만 이용할 수 있습니다.<br>발급받은 아이디와 비밀번호로 로그인하세요.</p>
+      <p class="login-server" id="loginServerInfo"></p>
+    </div>
+    <form id="loginForm">
+      <label class="d-field">
+        <span>아이디</span>
+        <input type="text" id="loginId" autocomplete="username" required spellcheck="false">
+      </label>
+      <label class="d-field">
+        <span>비밀번호</span>
+        <input type="password" id="loginPw" autocomplete="current-password" required>
+      </label>
+      <p class="login-error" id="loginError" hidden></p>
+      <div class="modal-actions">
+        <button class="btn-primary" type="submit" id="btnLogin">로그인</button>
+        <button class="btn-ghost" type="button" id="btnCloseLogin">닫기</button>
+      </div>
+    </form>
   </div>
 </div>
 

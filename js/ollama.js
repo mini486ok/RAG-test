@@ -8,19 +8,48 @@
 export class OllamaClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.authHeader = null; // 인증 프록시(원격 공유 모드)용 Basic Auth
   }
 
   setBaseUrl(url) {
     this.baseUrl = url.replace(/\/+$/, '');
   }
 
-  /** 서버 연결 + 모델 목록. 실패 시 throw */
-  async listModels(timeoutMs = 5000) {
+  /** 인증 프록시 로그인 정보 설정 (유니코드 아이디 대응) */
+  setAuth(user, pw) {
+    const raw = `${user}:${pw}`;
+    this.authHeader = 'Basic ' + btoa(String.fromCharCode(...new TextEncoder().encode(raw)));
+  }
+
+  clearAuth() {
+    this.authHeader = null;
+  }
+
+  headers(extra = {}) {
+    const h = { ...extra };
+    if (this.authHeader) h['Authorization'] = this.authHeader;
+    return h;
+  }
+
+  /** 응답 오류 → 서버(프록시)가 준 한국어 메시지를 우선 사용 */
+  async httpError(res, fallback) {
+    const body = await res.text().catch(() => '');
+    let msg = '';
+    try {
+      msg = JSON.parse(body).error || '';
+    } catch { /* JSON 아님 */ }
+    const err = new Error(msg || `${fallback} (HTTP ${res.status}) ${body.slice(0, 160)}`);
+    err.status = res.status;
+    return err;
+  }
+
+  /** 서버 연결 + 모델 목록. 실패 시 throw (401이면 err.status=401) */
+  async listModels(timeoutMs = 8000) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetch(`${this.baseUrl}/api/tags`, { signal: ctrl.signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(`${this.baseUrl}/api/tags`, { signal: ctrl.signal, headers: this.headers() });
+      if (!res.ok) throw await this.httpError(res, '서버 오류');
       const data = await res.json();
       return (data.models || []).map((m) => ({
         name: m.name,
@@ -92,14 +121,11 @@ export class OllamaClient {
     try {
       const res = await fetch(`${this.baseUrl}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ model, messages, stream: true, options, ...(format ? { format } : {}) }),
         signal: ctrl.signal,
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`Ollama 응답 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
-      }
+      if (!res.ok) throw await this.httpError(res, 'Ollama 응답 오류');
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -146,14 +172,11 @@ export class OllamaClient {
     try {
       const res = await fetch(`${this.baseUrl}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ model, messages, stream: false, format: 'json', options }),
         signal: composed.signal,
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`Ollama 응답 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
-      }
+      if (!res.ok) throw await this.httpError(res, 'Ollama 응답 오류');
       const data = await res.json();
       return data.message?.content || '';
     } finally {
@@ -167,14 +190,11 @@ export class OllamaClient {
     try {
       const res = await fetch(`${this.baseUrl}/api/embed`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ model, input }),
         signal: composed.signal,
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`임베딩 오류 (HTTP ${res.status}) ${body.slice(0, 200)}`);
-      }
+      if (!res.ok) throw await this.httpError(res, '임베딩 오류');
       const data = await res.json();
       const arr = data.embeddings || [];
       if (arr.length !== input.length) {

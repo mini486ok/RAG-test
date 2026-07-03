@@ -15,7 +15,32 @@ import { $, $$, toast, makeStreamRenderer, fmtMs, fmtNum, fmtBytes, escapeHtml, 
 
 // ── 전역 상태 ──────────────────────────────
 const settings = loadSettings();
+applyServerParam(); // ?server= 공유 링크 지원 (settings 로드 직후)
 const client = new OllamaClient(settings.ollamaUrl);
+let authUser = null; // 원격 공유 모드 로그인 사용자
+
+/** 공유 링크의 ?server=https://... 파라미터를 서버 주소로 적용 */
+function applyServerParam() {
+  try {
+    const raw = new URLSearchParams(location.search).get('server');
+    if (!raw) return;
+    const u = new URL(raw);
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      settings.ollamaUrl = u.origin + (u.pathname === '/' ? '' : u.pathname.replace(/\/+$/, ''));
+      saveSettings();
+    }
+  } catch { /* 잘못된 파라미터는 무시 */ }
+}
+
+/** 로컬(자기 PC) Ollama가 아닌 원격 공유 서버인지 */
+function isRemoteServer() {
+  try {
+    const host = new URL(settings.ollamaUrl).hostname;
+    return host !== 'localhost' && host !== '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
 const vectorStore = new VectorStore();
 const graphStore = new GraphStore();
 let connected = false;
@@ -220,6 +245,7 @@ async function init() {
   initPanels();
   initQueryConsole();
   initDrawer();
+  initAuth();
   initBuildTab();
   initVizTab();
 
@@ -295,31 +321,47 @@ function setIdleEmptyStates() {
 }
 
 // ── 연결 ──────────────────────────────
-async function connect() {
+/** 연결 시도 본체 — 성공 시 UI 갱신, 실패 시 throw (호출자가 UI 처리) */
+async function connectRaw() {
   const box = $('#connBox');
   box.className = 'conn-box';
   $('#connText').textContent = '연결 확인 중…';
   client.setBaseUrl(settings.ollamaUrl);
+  models = await client.listModels();
+  if (!models.length) {
+    const err = new Error('설치된 모델이 없습니다.');
+    err.noModels = true;
+    throw err;
+  }
+  connected = true;
+  box.classList.add('ok');
+  const who = authUser ? ` · ${authUser}` : '';
+  $('#connText').textContent = `${isRemoteServer() ? '원격 서버' : 'Ollama'} 연결됨 · 모델 ${models.length}개${who}`;
+  populateModelSelects();
+  $('#drawerInfo').textContent = `서버: ${settings.ollamaUrl}\n모델 ${models.length}개 감지${authUser ? `\n로그인: ${authUser}` : ''}`;
+}
+
+async function connect() {
   try {
-    models = await client.listModels();
-    if (!models.length) {
-      connected = false;
-      box.classList.add('fail');
-      $('#connText').textContent = 'Ollama에 설치된 모델이 없습니다';
-      toast('설치된 모델이 없습니다. 터미널에서 `ollama pull exaone3.5:7.8b`와 `ollama pull bge-m3`를 실행하세요.', 'err', 9000);
-      return;
-    }
-    connected = true;
-    box.classList.add('ok');
-    $('#connText').textContent = `Ollama 연결됨 · 모델 ${models.length}개`;
-    populateModelSelects();
-    $('#drawerInfo').textContent = `서버: ${settings.ollamaUrl}\n모델 ${models.length}개 감지`;
+    await connectRaw();
   } catch (e) {
     connected = false;
-    box.classList.add('fail');
-    $('#connText').textContent = 'Ollama 연결 실패 — 클릭하여 안내 보기';
-    showCorsModal();
-    console.warn('Ollama 연결 실패:', e);
+    const box = $('#connBox');
+    box.className = 'conn-box fail';
+    if (e.status === 401) {
+      $('#connText').textContent = '로그인 필요 — 클릭하여 로그인';
+      showLoginModal(authUser ? '저장된 로그인 정보가 만료되었거나 잘못되었습니다. 다시 로그인하세요.' : undefined);
+    } else if (e.noModels) {
+      $('#connText').textContent = 'Ollama에 설치된 모델이 없습니다';
+      toast('설치된 모델이 없습니다. 터미널에서 `ollama pull exaone3.5:7.8b`와 `ollama pull bge-m3`를 실행하세요.', 'err', 9000);
+    } else if (isRemoteServer()) {
+      $('#connText').textContent = '원격 서버 연결 실패 — 클릭하여 재시도';
+      toast(`원격 서버(${settings.ollamaUrl})에 연결할 수 없습니다. 서버 운영자에게 문의하세요.`, 'err', 7000);
+    } else {
+      $('#connText').textContent = 'Ollama 연결 실패 — 클릭하여 안내 보기';
+      showCorsModal();
+    }
+    console.warn('연결 실패:', e);
   }
 }
 
@@ -565,6 +607,7 @@ function handleRunError(panel, e) {
   panel.setSignal('error');
   panel.setStage('ERROR');
   panel.setEmpty(`⚠ 오류: ${escapeHtml(e.message || String(e))}`);
+  if (e.status === 401) showLoginModal('세션이 만료되었습니다. 다시 로그인하세요.');
   console.error(`[${panel.mode}]`, e);
 }
 
@@ -699,6 +742,11 @@ function trapFocus(container, e) {
 }
 
 function showCorsModal() {
+  // 원격 공유 서버 모드에서는 CORS 안내 대신 로그인 모달이 관문
+  if (isRemoteServer()) {
+    showLoginModal();
+    return;
+  }
   const modal = $('#corsModal');
   if (!modal.hidden) return;
   modalLastFocus = document.activeElement;
@@ -709,6 +757,87 @@ function showCorsModal() {
 function hideCorsModal() {
   $('#corsModal').hidden = true;
   modalLastFocus?.focus?.();
+}
+
+// ── 로그인 (원격 공유 서버) ──────────────────────────────
+function loadStoredAuth() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_KEYS.auth) || 'null');
+    if (raw?.u && raw?.p) {
+      client.setAuth(raw.u, atob(raw.p));
+      authUser = raw.u;
+    }
+  } catch { /* 무시 */ }
+}
+
+function storeAuth(user, pw) {
+  localStorage.setItem(LS_KEYS.auth, JSON.stringify({ u: user, p: btoa(pw) }));
+}
+
+function clearAuth() {
+  localStorage.removeItem(LS_KEYS.auth);
+  client.clearAuth();
+  authUser = null;
+  refreshAuthUI();
+}
+
+function refreshAuthUI() {
+  const box = $('#authStatus');
+  box.hidden = !authUser;
+  if (authUser) $('#authUserText').innerHTML = `<b>●</b> <span>${escapeHtml(authUser)}</span> 로그인됨`;
+}
+
+function showLoginModal(message) {
+  const modal = $('#loginModal');
+  $('#loginServerInfo').textContent = `서버: ${settings.ollamaUrl}`;
+  const err = $('#loginError');
+  err.hidden = !message;
+  if (message) err.textContent = message;
+  if (!modal.hidden) return;
+  modalLastFocus = document.activeElement;
+  modal.hidden = false;
+  $('#loginId').focus();
+}
+
+function hideLoginModal() {
+  $('#loginModal').hidden = true;
+  modalLastFocus?.focus?.();
+}
+
+function initAuth() {
+  loadStoredAuth();
+  refreshAuthUI();
+
+  $('#loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = $('#loginId').value.trim();
+    const pw = $('#loginPw').value;
+    if (!id || !pw) return;
+    $('#btnLogin').disabled = true;
+    client.setAuth(id, pw);
+    try {
+      await connectRaw();
+      authUser = id;
+      storeAuth(id, pw);
+      refreshAuthUI();
+      hideLoginModal();
+      $('#loginPw').value = '';
+      toast(`${id}님, 로그인되었습니다.`, 'ok');
+    } catch (err2) {
+      client.clearAuth();
+      showLoginModal(err2.status === 401 ? '아이디 또는 비밀번호가 올바르지 않습니다.' : `연결 실패: ${err2.message}`);
+    } finally {
+      $('#btnLogin').disabled = false;
+    }
+  });
+  $('#btnCloseLogin').addEventListener('click', hideLoginModal);
+  $('#btnLogout').addEventListener('click', async () => {
+    clearAuth();
+    connected = false;
+    toast('로그아웃되었습니다.', 'info');
+    // 서버가 인증을 요구하면 connect()가 401을 받아 로그인 모달을 자동 표시
+    await connect();
+  });
 }
 
 // ── 설정 드로어 ──────────────────────────────
@@ -737,13 +866,16 @@ function initDrawer() {
   // ESC로 오버레이 닫기 + Tab 포커스 트랩
   document.addEventListener('keydown', (e) => {
     const modal = $('#corsModal');
+    const login = $('#loginModal');
     if (e.key === 'Escape') {
-      if (!modal.hidden) hideCorsModal();
+      if (!login.hidden) hideLoginModal();
+      else if (!modal.hidden) hideCorsModal();
       else if (drawer.classList.contains('open')) closeDrawer();
       return;
     }
     if (e.key === 'Tab') {
-      if (!modal.hidden) trapFocus(modal, e);
+      if (!login.hidden) trapFocus(login, e);
+      else if (!modal.hidden) trapFocus(modal, e);
       else if (drawer.classList.contains('open')) trapFocus(drawer, e);
     }
   });

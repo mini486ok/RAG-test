@@ -1087,6 +1087,34 @@ body[data-theme="light"] .signal-box { background: rgba(16, 34, 70, 0.08); }
 .modal-note { font-size: 0.76rem; margin-top: 6px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 18px; justify-content: flex-end; }
 
+.modal-sm { max-width: 400px; }
+.modal-sm form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.login-server {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-3);
+  margin-top: 8px;
+  word-break: break-all;
+}
+.login-error {
+  color: var(--st-critical);
+  font-size: 0.8rem;
+  background: rgba(208, 59, 59, 0.1);
+  border: 1px solid rgba(208, 59, 59, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.auth-status {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  background: var(--chip-bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.auth-status b { color: var(--st-good); }
+
 /* ─────────────── 토스트 ─────────────── */
 .toast-stack {
   position: fixed;

@@ -159,4 +159,5 @@ export const LS_KEYS = {
   settings: 'raglab.settings.v1',
   history: 'raglab.history.v1',
   theme: 'raglab.theme',
+  auth: 'raglab.auth.v1',
 };
