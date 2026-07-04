@@ -118,6 +118,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'  # chunked 스트리밍에 필수
     ollama_url = 'http://localhost:11434'
     accounts = {'users': {}}
+    accounts_mtime = 0.0
+
+    @classmethod
+    def refresh_accounts(cls):
+        """accounts.json이 바뀌면 자동 재로딩 — 계정 추가 후 재시작 불필요."""
+        try:
+            m = os.path.getmtime(ACCOUNTS_PATH)
+        except OSError:
+            return
+        if m != cls.accounts_mtime:
+            with _lock:
+                if m != cls.accounts_mtime:
+                    try:
+                        cls.accounts = load_accounts()
+                        cls.accounts_mtime = m
+                        sys.stderr.write(f'[accounts] 재로딩: {len(cls.accounts["users"])}개 계정\n')
+                    except Exception as e:
+                        sys.stderr.write(f'[accounts] 재로딩 실패(기존 유지): {e}\n')
 
     # ---- 유틸 ----
 
@@ -161,6 +179,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def check_auth(self):
         """인증 성공 시 사용자ID 반환, 실패 시 None (응답도 전송)."""
+        self.refresh_accounts()
         ip = self.client_ip()
         now = time.time()
         with _lock:
