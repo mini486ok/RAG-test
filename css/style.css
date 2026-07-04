@@ -463,6 +463,33 @@ body[data-theme="light"] .signal-box { background: rgba(16, 34, 70, 0.08); }
   display: flex; align-items: center;
 }
 
+/* 컨텍스트 수용성 게이지 */
+.ctx-budget {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 15px;
+  border-bottom: 1px dashed var(--hairline-2);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--ink-2);
+}
+.ctx-budget .b-label { color: var(--ink-3); letter-spacing: 0.04em; flex: none; }
+.ctx-budget .b-bar {
+  flex: 1; min-width: 60px; max-width: 140px;
+  height: 5px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.ctx-budget .b-fill {
+  display: block; height: 100%;
+  background: var(--mode-c);
+  border-radius: 999px;
+  transition: width 0.4s;
+}
+.ctx-budget .b-fill.hot { background: var(--st-serious); }
+.ctx-budget .b-text { font-variant-numeric: tabular-nums; }
+.ctx-budget .b-warn { color: var(--st-warn); }
+
 .engine-body { flex: 1; padding: 13px 15px; overflow-y: auto; max-height: 520px; position: relative; }
 .answer { font-size: 0.9rem; line-height: 1.75; word-break: break-word; }
 .answer.streaming::after {

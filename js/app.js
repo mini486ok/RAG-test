@@ -2,7 +2,7 @@
 // RAIL·RAG LAB — 메인 애플리케이션 컨트롤러
 // ═══════════════════════════════════════════════
 
-import { DEFAULTS, MODES, EXAMPLE_QUESTIONS, SYSTEM_PROMPT_BASE, LS_KEYS, buildBasicMessages, buildVectorMessages, buildGraphMessages } from './config.js';
+import { DEFAULTS, MODES, SYSTEM_PROMPT_BASE, LS_KEYS, buildBasicMessages, buildVectorMessages, buildGraphMessages } from './config.js';
 import { OllamaClient } from './ollama.js';
 import { idb } from './db.js';
 import { parseFile, cleanText, detectType } from './parser.js';
@@ -98,6 +98,14 @@ function loadSettings() {
   s.graph.maxCtxTriples = numOr(s.graph.maxCtxTriples, 5, 80, base.graph.maxCtxTriples);
   s.graph.chunkTopK = numOr(s.graph.chunkTopK, 0, 8, base.graph.chunkTopK);
   s.graph.gleaning = numOr(s.graph.gleaning, 0, 2, base.graph.gleaning);
+  s.graph.extractChunkSize = numOr(s.graph.extractChunkSize, 500, 4000, base.graph.extractChunkSize);
+  s.graphModel = typeof s.graphModel === 'string' ? s.graphModel : '';
+  // v2 마이그레이션: 시연 최적 기본값 적용 (사용자가 바꾼 적 없는 옛 기본값만 교체)
+  if ((saved.paramVersion || 1) < 2) {
+    if (s.graph.maxTriples === 12) s.graph.maxTriples = 8;
+    if (s.graph.extractChunkSize === 1200) s.graph.extractChunkSize = 1800;
+    s.paramVersion = 2;
+  }
   return s;
 }
 
@@ -118,6 +126,7 @@ class EnginePanel {
     this.root = node;
     this.signal = node.querySelector('.signal-box');
     this.stage = node.querySelector('.engine-stage');
+    this.budget = node.querySelector('.ctx-budget');
     this.answer = node.querySelector('.answer');
     this.empty = node.querySelector('.engine-empty');
     this.ctxDetails = node.querySelector('.ctx-details');
@@ -129,6 +138,8 @@ class EnginePanel {
   reset() {
     this.setSignal('idle');
     this.setStage('STANDBY · 대기');
+    this.budget.hidden = true;
+    this.budget.innerHTML = '';
     this.answer.innerHTML = '';
     this.answer.classList.remove('streaming');
     this.empty.innerHTML = '';
@@ -158,6 +169,33 @@ class EnginePanel {
     el.classList.remove('flash');
     void el.offsetWidth;
     el.classList.add('flash');
+  }
+
+  /** RAG 컨텍스트 사용률 게이지: 사전 추정치 표시 */
+  setBudget(estTokens, budgetTokens, trimmed) {
+    const pct = Math.min(100, Math.round((estTokens / budgetTokens) * 100));
+    const warn = trimmed > 0
+      ? `<span class="b-warn">⚠ 예산 초과로 ${trimmed}건 절삭됨</span>`
+      : '';
+    this.budget.innerHTML =
+      `<span class="b-label">주입 컨텍스트</span>` +
+      `<span class="b-bar"><span class="b-fill${pct >= 90 ? ' hot' : ''}" style="width:${pct}%"></span></span>` +
+      `<span class="b-text">≈${fmtNum(estTokens)} / ${fmtNum(budgetTokens)} tok (${pct}%)</span>${warn}`;
+    this.budget.hidden = false;
+    this._budgetShown = true;
+  }
+
+  /** 생성 완료 후 Ollama 실측값(prompt_eval_count)으로 게이지 갱신 */
+  updateBudgetActual(promptTokens, numCtx) {
+    if (!this._budgetShown || promptTokens == null) return;
+    const pct = Math.min(100, Math.round((promptTokens / numCtx) * 100));
+    const text = this.budget.querySelector('.b-text');
+    if (text) text.textContent = `실측 ${fmtNum(promptTokens)} tok · num_ctx ${fmtNum(numCtx)}의 ${pct}%`;
+    const fill = this.budget.querySelector('.b-fill');
+    if (fill) {
+      fill.style.width = pct + '%';
+      fill.classList.toggle('hot', pct >= 90);
+    }
   }
 
   applyMetrics(m) {
@@ -368,9 +406,12 @@ async function connect() {
 function populateModelSelects() {
   const chatSel = $('#chatModel');
   const embedSel = $('#embedModel');
+  const graphSel = $('#graphModel');
   const opts = models.map((m) => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)}</option>`).join('');
   chatSel.innerHTML = opts;
   embedSel.innerHTML = opts;
+  graphSel.innerHTML = `<option value="">(응답 모델과 동일)</option>` + opts;
+  graphSel.value = models.some((m) => m.name === settings.graphModel) ? settings.graphModel : '';
 
   // 기본값 매칭 (정확 일치 → 접두 일치)
   const pick = (want, fallbackHint) => {
@@ -399,26 +440,19 @@ function populateModelSelects() {
       settings.embedModel = embedSel.value;
       saveSettings();
       if (vectorStore.size && vectorStore.embedModel && vectorStore.embedModel !== embedSel.value) {
-        toast('임베딩 모델이 변경되었습니다. Vector/Graph DB를 다시 구축해야 검색이 동작합니다.', 'warn', 6000);
+        toast('임베딩 모델이 변경되었습니다. Vector/Graph DB를 [전체 재구축]해야 검색이 동작합니다.', 'warn', 6000);
       }
+    });
+    graphSel.addEventListener('change', () => {
+      settings.graphModel = graphSel.value;
+      saveSettings();
+      toast(`Graph 추출 모델: ${graphSel.value || '(응답 모델과 동일)'}`, 'info', 2500);
     });
   }
 }
 
 // ── 질의 콘솔 ──────────────────────────────
 function initQueryConsole() {
-  const chipBox = $('#exampleChips');
-  for (const q of EXAMPLE_QUESTIONS) {
-    const chip = document.createElement('button');
-    chip.className = 'chip';
-    chip.textContent = q;
-    chip.addEventListener('click', () => {
-      $('#queryInput').value = q;
-      $('#queryInput').focus();
-    });
-    chipBox.appendChild(chip);
-  }
-
   $('#queryInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -561,6 +595,9 @@ async function streamAnswer(panel, messages, run, genOptions, signal) {
   m.tps = computeTps(res.evalTokens, res.evalDurationMs);
   panel.applyMetrics(m);
 
+  // 컨텍스트 게이지를 실측값(prompt_eval_count)으로 갱신
+  panel.updateBudgetActual(res.promptTokens, settings.numCtx);
+
   if (res.aborted) {
     panel.setStage('ABORTED · 사용자 중단');
     panel.setSignal('idle');
@@ -593,9 +630,9 @@ function fitContextBudget(items, itemChars, baseChars, truncate) {
   if (!kept.length && items.length && truncate) {
     const maxChars = Math.max(200, Math.floor(budgetChars - baseChars - 80));
     kept.push(truncate(items[0], maxChars));
-    return { kept, trimmed: items.length - 1, usedChars: baseChars + maxChars };
+    return { kept, trimmed: items.length - 1, usedChars: baseChars + maxChars, budgetTokens };
   }
-  return { kept, trimmed: items.length - kept.length, usedChars: total };
+  return { kept, trimmed: items.length - kept.length, usedChars: total, budgetTokens };
 }
 
 function handleRunError(panel, e) {
@@ -658,6 +695,8 @@ async function runVector(query, run, genOptions, signal, shared) {
       ctxChunks = fit.kept;
       toast(`Vector: 컨텍스트 예산 초과로 청크 ${fit.trimmed}건을 제외했습니다. (num_ctx 상향 가능)`, 'info');
     }
+    // 컨텍스트 수용성 게이지 (사전 추정 → 생성 후 실측으로 갱신)
+    panel.setBudget(Math.round(fit.usedChars / 1.6), fit.budgetTokens, fit.trimmed);
     // 근거 패널에는 실제로 LLM에 주입되는 청크만 표시 (표시-주입 일치)
     panel.showChunks(ctxChunks);
     await streamAnswer(panel, buildVectorMessages(settings.sysPrompt, query, ctxChunks), run, genOptions, signal);
@@ -705,6 +744,8 @@ async function runGraph(query, run, genOptions, signal, shared) {
     if (fitT.trimmed > 0 || fitC.trimmed > 0) {
       toast(`Graph: 컨텍스트 예산 초과로 트리플 ${fitT.trimmed}건·원문 청크 ${fitC.trimmed}건을 제외했습니다.`, 'info');
     }
+    // 컨텍스트 수용성 게이지 (사전 추정 → 생성 후 실측으로 갱신)
+    panel.setBudget(Math.round(fitC.usedChars / 1.6), fitC.budgetTokens, fitT.trimmed + fitC.trimmed);
     // 근거 패널에는 실제 주입분만 표시 (표시-주입 일치)
     panel.showGraphCtx({ seeds: result.seeds, triples, ctxChunks });
     await streamAnswer(panel, buildGraphMessages(settings.sysPrompt, query, triples, ctxChunks), run, genOptions, signal);
@@ -953,10 +994,14 @@ function initBuildTab() {
   bindVectorParams();
   bindGraphParams();
 
-  $('#btnBuildVector').addEventListener('click', () => buildVector());
-  $('#btnBuildGraph').addEventListener('click', () => buildGraph());
+  $('#btnBuildVector').addEventListener('click', () => buildVector(false));
+  $('#btnBuildGraph').addEventListener('click', () => buildGraph(false));
   $('#btnBuildAll').addEventListener('click', async () => {
-    if (await buildVector()) await buildGraph();
+    if (await buildVector(false)) await buildGraph(false);
+  });
+  $('#btnRebuildAll').addEventListener('click', async () => {
+    if (!confirm('기존 Vector/Graph DB를 비우고 모든 문서를 처음부터 다시 구축합니다. 계속할까요?')) return;
+    if (await buildVector(true)) await buildGraph(true);
   });
   $('#btnCancelBuild').addEventListener('click', () => buildAbort?.abort());
 }
@@ -982,6 +1027,7 @@ function bindGraphParams() {
   const g = settings.graph;
   $('#gMaxTriples').value = g.maxTriples;
   $('#gHops').value = g.hops;
+  // (추출 청크 크기는 아래에서 별도 바인딩)
   $('#gTopKEntities').value = g.topKEntities;
   $('#gMaxCtxTriples').value = g.maxCtxTriples;
   $('#gChunkTopK').value = g.chunkTopK;
@@ -993,6 +1039,8 @@ function bindGraphParams() {
   $('#gMaxCtxTriples').addEventListener('change', (e) => { g.maxCtxTriples = clampNum(e.target, 5, 80, DEFAULTS.graph.maxCtxTriples); saveSettings(); });
   $('#gChunkTopK').addEventListener('change', (e) => { g.chunkTopK = clampNum(e.target, 0, 8, DEFAULTS.graph.chunkTopK); saveSettings(); });
   $('#gGleaning').addEventListener('change', (e) => { g.gleaning = clampNum(e.target, 0, 2, DEFAULTS.graph.gleaning); saveSettings(); });
+  $('#gExtractChunk').value = g.extractChunkSize;
+  $('#gExtractChunk').addEventListener('change', (e) => { g.extractChunkSize = clampNum(e.target, 500, 4000, DEFAULTS.graph.extractChunkSize); saveSettings(); });
 
   renderEntityTags();
 }
@@ -1172,6 +1220,7 @@ function setBuildingUI(kind, active) {
   $('#btnBuildVector').disabled = active;
   $('#btnBuildGraph').disabled = active;
   $('#btnBuildAll').disabled = active;
+  $('#btnRebuildAll').disabled = active;
   $('#btnCancelBuild').hidden = !active;
   $(`#${kind}ProgressBox`).hidden = !active;
   // 구축 중 데이터 변경 차단 (정합성 보호)
@@ -1192,7 +1241,7 @@ function updateProgress(kind, done, total, stage) {
   $('#globalBuildText').textContent = `${kind === 'v' ? 'Vector' : 'Graph'} 구축 ${pct}%`;
 }
 
-async function buildVector() {
+async function buildVector(full = false) {
   if (building) return false;
   if (running) {
     toast('질의 실행 중에는 DB를 구축할 수 없습니다.', 'warn');
@@ -1211,19 +1260,36 @@ async function buildVector() {
     return false;
   }
 
+  // 증분 구축: 아직 DB에 반영되지 않은 신규 문서만 처리
+  let targets = docs;
+  if (!full) {
+    const built = new Set(vectorStore.docIds());
+    targets = docs.filter((d) => !built.has(d.id));
+    if (!targets.length) {
+      toast('Vector: 새로 추가된 문서가 없습니다. 파라미터 변경을 반영하려면 [전체 재구축]을 사용하세요.', 'info', 5000);
+      return true;
+    }
+    if (vectorStore.size && vectorStore.embedModel && vectorStore.embedModel !== settings.embedModel) {
+      toast('임베딩 모델이 기존 DB와 달라 증분 구축이 불가합니다. [전체 재구축]을 사용하세요.', 'err', 7000);
+      return false;
+    }
+  } else {
+    await vectorStore.clear();
+  }
+
   setBuildingUI('v', true);
   buildAbort = new AbortController();
   const t0 = performance.now();
   try {
     const count = await vectorStore.build(
-      docs,
+      targets,
       settings.vector,
       client,
       settings.embedModel,
       (done, total, stage) => updateProgress('v', done, total, stage),
       buildAbort.signal
     );
-    toast(`Vector DB 구축 완료: ${count}개 청크 (${fmtMs(performance.now() - t0)})`, 'ok', 5000);
+    toast(`Vector DB ${full ? '전체 재구축' : '증분 구축'} 완료: 문서 ${targets.length}건 → +${count}개 청크 (총 ${fmtNum(vectorStore.size)}개, ${fmtMs(performance.now() - t0)})`, 'ok', 5000);
     vizVectorDirty = true;
     refreshDbStats();
     setIdleEmptyStates();
@@ -1241,7 +1307,7 @@ async function buildVector() {
   }
 }
 
-async function buildGraph() {
+async function buildGraph(full = false) {
   if (building) return false;
   if (running) {
     toast('질의 실행 중에는 DB를 구축할 수 없습니다.', 'warn');
@@ -1256,19 +1322,36 @@ async function buildGraph() {
     return false;
   }
 
+  // 증분 구축: 아직 그래프에 반영되지 않은 신규 문서만 추출
+  let targets = docs;
+  if (!full) {
+    const built = new Set(graphStore.builtDocIds());
+    targets = docs.filter((d) => !built.has(d.id));
+    if (!targets.length) {
+      toast('Graph: 새로 추가된 문서가 없습니다. 파라미터 변경을 반영하려면 [전체 재구축]을 사용하세요.', 'info', 5000);
+      return true;
+    }
+    if (graphStore.nodeCount && graphStore.embedModel && graphStore.embedModel !== settings.embedModel) {
+      toast('임베딩 모델이 기존 Graph DB와 달라 증분 구축이 불가합니다. [전체 재구축]을 사용하세요.', 'err', 7000);
+      return false;
+    }
+  } else {
+    await graphStore.clear();
+  }
+
   setBuildingUI('g', true);
   buildAbort = new AbortController();
   const t0 = performance.now();
   try {
     const { nodes, edges, failed } = await graphStore.build(
-      docs,
+      targets,
       settings.graph,
       client,
-      { chatModel: settings.chatModel, embedModel: settings.embedModel, numCtx: settings.numCtx },
+      { chatModel: settings.graphModel || settings.chatModel, embedModel: settings.embedModel, numCtx: settings.numCtx },
       (done, total, stage) => updateProgress('g', done, total, stage),
       buildAbort.signal
     );
-    toast(`Graph DB 구축 완료: ${nodes}개 노드 · ${edges}개 관계 (${fmtMs(performance.now() - t0)})`, 'ok', 6000);
+    toast(`Graph DB ${full ? '전체 재구축' : '증분 구축'} 완료: 문서 ${targets.length}건 처리 → 노드 ${fmtNum(nodes)} · 관계 ${fmtNum(edges)} (${fmtMs(performance.now() - t0)})`, 'ok', 6000);
     if (failed > 0) toast(`추출 실패 청크 ${failed}건은 건너뛰었습니다. 그래프 밀도가 낮으면 재구축해 보세요.`, 'warn', 6000);
     vizGraphDirty = true;
     refreshDbStats();

@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RAIL·RAG LAB — 철도교통 특화 RAG 비교 관제실</title>
-<meta name="description" content="철도교통 특화 AI를 위한 Basic LLM / Vector RAG / Graph RAG 실시간 비교 실험실. 로컬 Ollama 기반.">
+<title>Rail-Brain Test Lab — 철도·교통 특화 AI 개발 테스트</title>
+<meta name="description" content="철도·교통 특화 AI 개발을 위한 Basic LLM / Vector RAG / Graph RAG 실시간 비교 테스트. 로컬 Ollama 기반.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚄</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -29,8 +29,8 @@
       <span class="station-dot dot-graph"></span>
     </div>
     <div class="brand-text">
-      <h1>RAIL·RAG <em>LAB</em></h1>
-      <p class="brand-sub">철도교통 특화 RAG 비교 관제실</p>
+      <h1>Rail-Brain <em>Test Lab</em></h1>
+      <p class="brand-sub">철도·교통 특화 AI 개발 테스트</p>
     </div>
   </div>
 
@@ -92,7 +92,6 @@
         <button class="btn-ghost" id="btnStop" disabled>중단</button>
       </div>
     </div>
-    <div class="example-chips" id="exampleChips" aria-label="예시 질문"></div>
   </div>
 
   <!-- 3-way 엔진 패널 -->
@@ -117,6 +116,7 @@
         </div>
       </header>
       <div class="engine-stage" aria-live="polite"></div>
+      <div class="ctx-budget" hidden></div>
       <div class="engine-body">
         <div class="answer md-body" aria-label="응답"></div>
         <div class="engine-empty"></div>
@@ -259,8 +259,13 @@
         <div class="param-grid">
           <label class="param">
             <span class="p-name">청크당 최대 트리플 <i class="hint" data-tip="한 청크에서 추출할 (개체-관계-개체) 트리플의 최대 개수. 많을수록 그래프가 촘촘해지지만 구축이 느려집니다.">?</i></span>
-            <input type="number" id="gMaxTriples" min="3" max="30" value="12">
+            <input type="number" id="gMaxTriples" min="3" max="30" value="8">
             <span class="p-unit">개</span>
+          </label>
+          <label class="param">
+            <span class="p-name">추출 청크 크기 <i class="hint" data-tip="개체·관계 추출 시 한 번에 LLM에 넣는 텍스트 크기. 클수록 LLM 호출 횟수가 줄어 구축이 빨라지지만, 너무 크면 추출 누락이 늘 수 있습니다.">?</i></span>
+            <input type="number" id="gExtractChunk" min="500" max="4000" step="100" value="1800">
+            <span class="p-unit">자</span>
           </label>
           <label class="param">
             <span class="p-name">탐색 깊이(Hop) <i class="hint" data-tip="질의 개체에서 몇 단계 떨어진 이웃까지 그래프를 탐색할지. 보통 1~2.">?</i></span>
@@ -288,7 +293,11 @@
             <span class="p-unit">회</span>
           </label>
           <label class="param param-wide">
-            <span class="p-name">개체 유형 <i class="hint" data-tip="지식그래프의 노드 분류 체계입니다. 철도 도메인에 맞게 수정할 수 있습니다.">?</i></span>
+            <span class="p-name">추출 모델 <i class="hint" data-tip="개체·관계 추출에 사용할 LLM. 작은 모델(예: qwen2.5:3b)을 선택하면 구축 시간이 크게 줄어듭니다. 기본은 응답 모델과 동일.">?</i></span>
+            <select id="graphModel"></select>
+          </label>
+          <label class="param param-wide">
+            <span class="p-name">개체 유형 <i class="hint" data-tip="지식그래프 노드 분류의 기본 가이드입니다. LLM이 문서에서 새로운 유형을 발견하면 자동으로 추가 수용됩니다(하이브리드).">?</i></span>
             <div class="tag-editor" id="gEntityTypes"></div>
           </label>
         </div>
@@ -301,9 +310,11 @@
       </div>
 
       <div class="build-actions">
-        <button class="btn-primary" id="btnBuildAll">전체 구축 (Vector + Graph)</button>
+        <button class="btn-primary" id="btnBuildAll">구축 (Vector + Graph)</button>
+        <button class="btn-ghost" id="btnRebuildAll" title="기존 DB를 비우고 모든 문서를 처음부터 다시 구축합니다. 파라미터·모델을 변경했을 때 사용하세요.">전체 재구축</button>
         <button class="btn-ghost" id="btnCancelBuild" hidden>구축 중단</button>
       </div>
+      <p class="param-note">구축은 <b>새로 추가된 문서만</b> 처리해 기존 DB에 누적됩니다. 파라미터나 모델을 변경했다면 [전체 재구축]을 사용하세요.</p>
     </div>
   </div>
 </section>

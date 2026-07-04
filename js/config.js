@@ -21,15 +21,17 @@ export const DEFAULTS = {
   },
 
   graph: {
-    maxTriples: 12,
+    maxTriples: 8,          // 시연 최적: 구축 속도-품질 균형
     hops: 2,
     topKEntities: 6,
     maxCtxTriples: 30,
     chunkTopK: 2,
     gleaning: 0,
-    extractChunkSize: 1200, // 그래프 추출용 청크(벡터 청크보다 크게)
+    extractChunkSize: 1800, // 그래프 추출용 청크 — 클수록 LLM 호출 수 감소(구축 빨라짐)
     entityTypes: ['시설/설비', '차량', '기술/시스템', '규정/법령', '조직/기관', '직무/인물', '사고/장애', '절차/업무', '개념/용어', '위치/노선'],
   },
+  graphModel: '', // 그래프 추출용 LLM ('' = 응답 모델과 동일)
+  paramVersion: 2,
 };
 
 export const MODES = {
@@ -49,17 +51,6 @@ export const MODES = {
     desc: '지식그래프(개체·관계) 탐색 결과를 근거로 답변',
   },
 };
-
-export const EXAMPLE_QUESTIONS = [
-  'ATS와 ATC, ATP의 차이점을 설명해줘',
-  '선로전환기는 어떤 설비와 연동되어 동작하는가?',
-  '선로전환기 장애 발생 시 조치 절차는?',
-  '관제사와 기관사는 비상 시 어떤 지휘·보고 관계인가?',
-  '철도안전법상 철도종사자의 음주 기준은?',
-  '전차선 단전 시 기관사가 취해야 할 조치는?',
-  'KTX와 SRT의 공통점과 차이점은?',
-  '철도차량 일상검사와 정기검사는 어떻게 다른가?',
-];
 
 // 철도 약어·동의어 별칭 사전 — Graph 검색 시 질의 확장에 사용
 export const RAIL_ALIASES = [
@@ -112,17 +103,22 @@ export function buildVectorMessages(sysPrompt, query, ctxChunks) {
 
 export function buildGraphMessages(sysPrompt, query, triples, ctxChunks) {
   const tripleText = triples
-    .map((t, i) => `${i + 1}. (${t.source}) -[${t.relation}]-> (${t.target})${t.desc ? ' : ' + t.desc : ''}`)
+    .map((t) => {
+      const src = t.docNames?.length ? ` [출처: ${t.docNames.join(', ')}]` : '';
+      return `- (${t.source}) -[${t.relation}]-> (${t.target})${t.desc ? ' : ' + t.desc : ''}${src}`;
+    })
     .join('\n');
   const chunkText = ctxChunks.length
-    ? `\n\n--- 관련 원문 청크 ---\n` +
-      ctxChunks.map((c, i) => `[원문 ${i + 1}] (출처: ${c.docName})\n${c.text}`).join('\n\n')
+    ? `\n\n--- 관련 원문 ---\n` +
+      ctxChunks.map((c) => `[출처: ${c.docName}]\n${c.text}`).join('\n\n')
     : '';
   const user =
     `다음은 질문과 관련하여 지식그래프에서 탐색된 개체·관계 정보입니다.\n` +
     `--- 지식그래프 정보 시작 ---\n${tripleText}${chunkText}\n--- 지식그래프 정보 끝 ---\n\n` +
-    `위 지식그래프의 관계 정보를 우선적으로 활용하여 아래 질문에 답하십시오. ` +
-    `개체 간 관계와 맥락을 종합하여 설명하고, 그래프에 없는 내용은 일반 지식임을 밝히십시오.\n\n` +
+    `위 지식그래프의 관계 정보를 우선적으로 활용하여 아래 질문에 답하십시오.\n` +
+    `[인용 규칙] 근거를 표시할 때 "지식그래프 정보 N" 같은 내부 번호는 절대 사용하지 마십시오. ` +
+    `반드시 출처 문서명과, 원문에 명시된 경우 조항·항목 번호(예: "철도안전법 제41조", "운전취급규정 3.2절")를 기준으로 인용하십시오. ` +
+    `그래프에 없는 내용은 일반 지식임을 밝히십시오.\n\n` +
     `질문: ${query}`;
   return [
     { role: 'system', content: sysPrompt },
@@ -134,12 +130,13 @@ export function buildGraphMessages(sysPrompt, query, triples, ctxChunks) {
 export function buildExtractionPrompt(text, entityTypes, maxTriples) {
   return (
     `당신은 철도교통 도메인 지식그래프 구축 전문가입니다. 아래 텍스트에서 핵심 개체(entity)와 관계(relation)를 추출하십시오.\n\n` +
-    `[개체 유형 목록]\n${entityTypes.join(', ')}\n\n` +
+    `[기본 개체 유형]\n${entityTypes.join(', ')}\n\n` +
     `[규칙]\n` +
     `1. 개체명은 텍스트에 등장하는 간결한 명사구로 작성하고 조사(은/는/이/가 등)는 제거 (예: "ATS", "선로전환기", "철도안전법")\n` +
     `2. 관계는 최대 ${maxTriples}개까지, 텍스트에 명시된 사실만 추출\n` +
     `3. relation은 짧은 한국어 서술어로 작성 (예: "구성요소이다", "규정한다", "담당한다")\n` +
-    `4. 유형 판정 기준: 물리적 장치·설비는 "시설/설비", 제어 방식·표준·소프트웨어는 "기술/시스템", 법률·규칙·기준은 "규정/법령"으로 일관되게 분류\n` +
+    `4. 유형은 가능한 한 위 기본 목록에서 선택하고 일관되게 판정(물리적 장치·설비는 "시설/설비", 제어 방식·표준·소프트웨어는 "기술/시스템", 법률·규칙·기준은 "규정/법령"). ` +
+    `기본 목록으로 표현할 수 없는 명확히 다른 범주만 간결한 새 유형명(10자 이내)으로 추가 가능\n` +
     `5. 반드시 아래 JSON 형식으로만 출력 (설명·주석 금지)\n\n` +
     `[출력 형식]\n` +
     `{"entities":[{"name":"개체명","type":"개체유형","description":"한 문장 설명"}],` +

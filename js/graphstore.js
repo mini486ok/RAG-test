@@ -43,7 +43,6 @@ function resolveKey(state, rawName) {
 
 /** 추출 결과를 상태(state)에 병합 */
 function mergeInto(state, ext, unit, entityTypes) {
-  const typeSet = new Set(entityTypes);
   for (const e of ext.entities) {
     if (!e.name || typeof e.name !== 'string') continue;
     const key = resolveKey(state, e.name);
@@ -53,8 +52,9 @@ function mergeInto(state, ext, unit, entityTypes) {
       node = {
         id: uid(),
         name: e.name.trim(),
-        // 허용 목록 밖 유형은 '개념/용어'로 강제 — 범례/필터 일관성 유지
-        type: typeSet.has(e.type) ? e.type : '개념/용어',
+        // 하이브리드 유형: 기본 목록은 프롬프트 가이드로 쓰되,
+        // LLM이 제시한 새 유형도 수용 (범례는 자동 확장)
+        type: (typeof e.type === 'string' && e.type.trim()) ? e.type.trim().slice(0, 20) : '개념/용어',
         desc: (e.description || '').slice(0, 300),
         degree: 0,
         weight: 0,
@@ -184,6 +184,16 @@ export class GraphStore {
 
   typeSet() {
     return [...new Set([...this.nodes.values()].map((n) => n.type || '기타'))];
+  }
+
+  /** 그래프에 반영된(추출 처리된) 문서 ID 목록 — 증분 구축 판단용 */
+  builtDocIds() {
+    const ids = new Set();
+    for (const cid of this.chunkTexts.keys()) {
+      const m = cid.match(/^(.+)-g\d+$/);
+      if (m) ids.add(m[1]);
+    }
+    return [...ids];
   }
 
   /**
@@ -351,14 +361,21 @@ export class GraphStore {
     }
     rankedEdges.sort((a, b) => b.rank - a.rank);
 
-    const triples = rankedEdges.slice(0, maxCtxTriples).map(({ edge, rank }) => ({
-      source: edge.source,
-      target: edge.target,
-      relation: edge.relation,
-      desc: edge.desc,
-      rank,
-      chunkIds: edge.chunkIds,
-    }));
+    const triples = rankedEdges.slice(0, maxCtxTriples).map(({ edge, rank }) => {
+      // 출처 문서명: 원본 문서 기준 인용을 위해 트리플마다 부착 (최대 2개)
+      const docNames = [...new Set(
+        edge.chunkIds.map((cid) => this.chunkTexts.get(cid)?.docName).filter(Boolean)
+      )].slice(0, 2);
+      return {
+        source: edge.source,
+        target: edge.target,
+        relation: edge.relation,
+        desc: edge.desc,
+        rank,
+        chunkIds: edge.chunkIds,
+        docNames,
+      };
+    });
 
     // 4) 시드 개체 관련 원문 청크 — 시드 간 라운드로빈으로 다양성 확보
     const ctxChunks = [];
