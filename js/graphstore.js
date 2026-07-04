@@ -200,9 +200,15 @@ export class GraphStore {
    * 그래프 구축 — 임시 상태에 수행하고 성공 시에만 커밋.
    * @returns {{nodes:number, edges:number, failed:number}}
    */
-  async build(docs, params, client, models, onProgress, signal) {
-    const work = cloneState(this);
-    for (const doc of docs) removeDocFromState(work, doc.id);
+  async build(docs, params, client, models, onProgress, signal, replaceAll = false) {
+    // 전체 재구축이어도 기존 상태는 건드리지 않고 빈 작업 상태에서 시작 —
+    // 성공(persist) 후에만 교체되므로 중단/실패 시 기존 DB 무손상
+    const work = replaceAll
+      ? { nodes: new Map(), edges: new Map(), chunkTexts: new Map() }
+      : cloneState(this);
+    if (!replaceAll) {
+      for (const doc of docs) removeDocFromState(work, doc.id);
+    }
 
     // 1) 추출용 청킹 (벡터 청크보다 큰 단위)
     const units = [];

@@ -43,7 +43,7 @@ export class VectorStore {
    * @param {(done:number,total:number,stage:string)=>void} onProgress
    * @param {AbortSignal} signal
    */
-  async build(docs, params, client, embedModel, onProgress, signal) {
+  async build(docs, params, client, embedModel, onProgress, signal, replaceAll = false) {
     // 1) 청킹
     const newChunks = [];
     for (const doc of docs) {
@@ -65,15 +65,19 @@ export class VectorStore {
       onProgress?.(Math.min(i + batch, newChunks.length), newChunks.length, '임베딩');
     }
 
-    // 3) 저장: 기존 청크 삭제 + 신규 삽입 + 메타를 단일 트랜잭션으로 (원자성)
+    // 3) 저장: 단일 트랜잭션 (원자성) — 전체 재구축이어도 성공 시에만 기존 데이터 교체
     const rebuiltDocIds = new Set(docs.map((d) => d.id));
     const stale = this.chunks.filter((c) => rebuiltDocIds.has(c.docId)).map((c) => c.id);
     await idb.atomicWrite([
-      { store: 'chunks', deleteKeys: stale, put: newChunks },
+      replaceAll
+        ? { store: 'chunks', clear: true, put: newChunks }
+        : { store: 'chunks', deleteKeys: stale, put: newChunks },
       { store: 'meta', put: [{ key: 'vectorBuiltAt', value: Date.now(), model: embedModel, dim: newChunks[0].vec.length, params: { chunkSize: params.chunkSize, overlap: params.overlap } }] },
     ]);
 
-    this.chunks = [...this.chunks.filter((c) => !rebuiltDocIds.has(c.docId)), ...newChunks];
+    this.chunks = replaceAll
+      ? newChunks
+      : [...this.chunks.filter((c) => !rebuiltDocIds.has(c.docId)), ...newChunks];
     this.dim = this.chunks[0]?.vec.length || 0;
     this.embedModel = embedModel;
     return newChunks.length;

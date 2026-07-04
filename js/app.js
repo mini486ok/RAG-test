@@ -1273,8 +1273,6 @@ async function buildVector(full = false) {
       toast('임베딩 모델이 기존 DB와 달라 증분 구축이 불가합니다. [전체 재구축]을 사용하세요.', 'err', 7000);
       return false;
     }
-  } else {
-    await vectorStore.clear();
   }
 
   setBuildingUI('v', true);
@@ -1287,23 +1285,25 @@ async function buildVector(full = false) {
       client,
       settings.embedModel,
       (done, total, stage) => updateProgress('v', done, total, stage),
-      buildAbort.signal
+      buildAbort.signal,
+      full // 전체 재구축도 성공 시에만 원자적으로 교체 (중단·실패 시 기존 DB 무손상)
     );
     toast(`Vector DB ${full ? '전체 재구축' : '증분 구축'} 완료: 문서 ${targets.length}건 → +${count}개 청크 (총 ${fmtNum(vectorStore.size)}개, ${fmtMs(performance.now() - t0)})`, 'ok', 5000);
-    vizVectorDirty = true;
-    refreshDbStats();
-    setIdleEmptyStates();
     return true;
   } catch (e) {
-    if (e.name === 'AbortError') toast('Vector DB 구축이 중단되었습니다.', 'warn');
+    if (e.name === 'AbortError') toast('Vector DB 구축이 중단되었습니다. (기존 DB는 유지됩니다)', 'warn');
     else {
-      toast(`Vector DB 구축 실패: ${e.message}`, 'err', 6000);
+      toast(`Vector DB 구축 실패: ${e.message} (기존 DB는 유지됩니다)`, 'err', 7000);
       console.error(e);
     }
     return false;
   } finally {
     setBuildingUI('v', false);
     buildAbort = null;
+    // 성공/실패와 무관하게 화면 상태를 실제 DB와 동기화
+    vizVectorDirty = true;
+    refreshDbStats();
+    setIdleEmptyStates();
   }
 }
 
@@ -1335,8 +1335,6 @@ async function buildGraph(full = false) {
       toast('임베딩 모델이 기존 Graph DB와 달라 증분 구축이 불가합니다. [전체 재구축]을 사용하세요.', 'err', 7000);
       return false;
     }
-  } else {
-    await graphStore.clear();
   }
 
   setBuildingUI('g', true);
@@ -1349,24 +1347,29 @@ async function buildGraph(full = false) {
       client,
       { chatModel: settings.graphModel || settings.chatModel, embedModel: settings.embedModel, numCtx: settings.numCtx },
       (done, total, stage) => updateProgress('g', done, total, stage),
-      buildAbort.signal
+      buildAbort.signal,
+      full // 전체 재구축도 성공 시에만 원자적으로 교체 (중단·실패 시 기존 DB 무손상)
     );
     toast(`Graph DB ${full ? '전체 재구축' : '증분 구축'} 완료: 문서 ${targets.length}건 처리 → 노드 ${fmtNum(nodes)} · 관계 ${fmtNum(edges)} (${fmtMs(performance.now() - t0)})`, 'ok', 6000);
-    if (failed > 0) toast(`추출 실패 청크 ${failed}건은 건너뛰었습니다. 그래프 밀도가 낮으면 재구축해 보세요.`, 'warn', 6000);
-    vizGraphDirty = true;
-    refreshDbStats();
-    setIdleEmptyStates();
+    if (failed > 0) {
+      const model = settings.graphModel || settings.chatModel;
+      toast(`추출 실패 청크 ${failed}건은 건너뛰었습니다. 실패가 많으면 추출 모델(${model})을 더 큰 모델로 바꿔보세요.`, 'warn', 7000);
+    }
     return true;
   } catch (e) {
-    if (e.name === 'AbortError') toast('Graph DB 구축이 중단되었습니다.', 'warn');
+    if (e.name === 'AbortError') toast('Graph DB 구축이 중단되었습니다. (기존 DB는 유지됩니다)', 'warn');
     else {
-      toast(`Graph DB 구축 실패: ${e.message}`, 'err', 6000);
+      toast(`Graph DB 구축 실패: ${e.message} (기존 DB는 유지됩니다)`, 'err', 7000);
       console.error(e);
     }
     return false;
   } finally {
     setBuildingUI('g', false);
     buildAbort = null;
+    // 성공/실패와 무관하게 화면 상태를 실제 DB와 동기화
+    vizGraphDirty = true;
+    refreshDbStats();
+    setIdleEmptyStates();
   }
 }
 
