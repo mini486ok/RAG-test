@@ -237,14 +237,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not user:
             return
 
-        # 일일 한도 검사 (GPU 사용 호출만)
+        # 일일 한도 검사 (GPU 사용 호출만) — limit 0 이하는 무제한
         if path in COUNTED_PATHS:
             limit = self.accounts['users'][user].get('daily_limit', DEFAULT_DAILY_LIMIT)
-            used = today_usage(user)
-            if used >= limit:
-                self.reply_json(429, {'error': f'일일 호출 한도({limit}회)를 초과했습니다. 내일 다시 이용하세요.'})
-                return
-            bump_usage(user)
+            if limit > 0:
+                used = today_usage(user)
+                if used >= limit:
+                    self.reply_json(429, {'error': f'일일 호출 한도({limit}회)를 초과했습니다. 내일 다시 이용하세요.'})
+                    return
+            bump_usage(user)  # 무제한이어도 사용량은 집계 (list로 확인 가능)
 
         # 본문 읽기
         body = b''
@@ -336,7 +337,20 @@ def cmd_list(_args):
         return 0
     print(f'{"아이디":<20} {"일일한도":>8} {"오늘사용":>8}')
     for name, acc in data['users'].items():
-        print(f'{name:<20} {acc.get("daily_limit", DEFAULT_DAILY_LIMIT):>8} {today_usage(name):>8}')
+        limit = acc.get('daily_limit', DEFAULT_DAILY_LIMIT)
+        limit_str = '무제한' if limit <= 0 else str(limit)
+        print(f'{name:<20} {limit_str:>8} {today_usage(name):>8}')
+    return 0
+
+
+def cmd_set_limit(args):
+    data = load_accounts()
+    if args.username not in data['users']:
+        print(f'계정이 없습니다: {args.username}')
+        return 1
+    data['users'][args.username]['daily_limit'] = args.limit
+    save_accounts(data)
+    print(f'{args.username} 일일 한도 → {"무제한" if args.limit <= 0 else f"{args.limit}회"} (실행 중인 서버에 자동 반영됨)')
     return 0
 
 
@@ -380,6 +394,11 @@ def main():
     p = sub.add_parser('remove-user', help='계정 삭제')
     p.add_argument('username')
     p.set_defaults(func=cmd_remove_user)
+
+    p = sub.add_parser('set-limit', help='일일 한도 변경 (0 = 무제한)')
+    p.add_argument('username')
+    p.add_argument('limit', type=int)
+    p.set_defaults(func=cmd_set_limit)
 
     p = sub.add_parser('list', help='계정 목록/사용량')
     p.set_defaults(func=cmd_list)
