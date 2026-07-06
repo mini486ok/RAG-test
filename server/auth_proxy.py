@@ -40,6 +40,8 @@ from urllib.parse import urlparse
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ACCOUNTS_PATH = os.path.join(BASE_DIR, 'accounts.json')
 USAGE_PATH = os.path.join(BASE_DIR, 'usage.json')
+DB_SNAPSHOT_PATH = os.path.join(BASE_DIR, 'db_snapshot.bin')
+DB_MAX_BYTES = 512 * 1024 * 1024  # DB 스냅샷 업로드 상한 512MB
 
 # 프록시를 통과시킬 Ollama API 경로 (그 외는 전부 차단)
 ALLOWED_PATHS = {'/api/tags', '/api/chat', '/api/embed', '/api/version'}
@@ -159,7 +161,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if origin:
             self.send_header('Access-Control-Allow-Origin', origin)
             self.send_header('Vary', 'Origin')
-            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS')
             self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
             self.send_header('Access-Control-Max-Age', '86400')
 
@@ -219,13 +221,88 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == '/healthz':
+        path = self.path.split('?')[0]
+        if path == '/healthz':
             self.reply_json(200, {'ok': True})
+            return
+        if path in ('/db', '/db/info'):
+            self.handle_db_get(path)
             return
         self.handle_proxy('GET')
 
     def do_POST(self):
         self.handle_proxy('POST')
+
+    def do_PUT(self):
+        if self.path.split('?')[0] == '/db':
+            self.handle_db_put()
+            return
+        self.reply_json(404, {'error': '허용되지 않은 경로입니다.'})
+
+    # ---- DB 스냅샷 보관소 (인증 필수, 쿼터 미집계) ----
+
+    def handle_db_get(self, path):
+        user = self.check_auth()
+        if not user:
+            return
+        exists = os.path.exists(DB_SNAPSHOT_PATH)
+        if path == '/db/info':
+            info = {'exists': exists}
+            if exists:
+                st = os.stat(DB_SNAPSHOT_PATH)
+                info.update(size=st.st_size, updated_at=int(st.st_mtime))
+            self.reply_json(200, info)
+            return
+        if not exists:
+            self.reply_json(404, {'error': '서버에 저장된 DB 스냅샷이 없습니다.'})
+            return
+        size = os.path.getsize(DB_SNAPSHOT_PATH)
+        self.send_response(200)
+        self.send_cors()
+        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('Content-Length', str(size))
+        self.end_headers()
+        try:
+            with open(DB_SNAPSHOT_PATH, 'rb') as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
+    def handle_db_put(self):
+        user = self.check_auth()
+        if not user:
+            return
+        length = int(self.headers.get('Content-Length', 0) or 0)
+        if length <= 0:
+            self.reply_json(400, {'error': '업로드할 내용이 없습니다.'})
+            return
+        if length > DB_MAX_BYTES:
+            self.reply_json(413, {'error': f'스냅샷이 상한({DB_MAX_BYTES // (1024 * 1024)}MB)을 초과합니다.'})
+            return
+        tmp = DB_SNAPSHOT_PATH + '.tmp'
+        remaining = length
+        try:
+            with open(tmp, 'wb') as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            if remaining > 0:
+                os.remove(tmp)
+                self.reply_json(400, {'error': '업로드가 중간에 끊겼습니다. 다시 시도하세요.'})
+                return
+            os.replace(tmp, DB_SNAPSHOT_PATH)  # 원자적 교체
+        except OSError as e:
+            self.reply_json(500, {'error': f'저장 실패: {e}'})
+            return
+        sys.stderr.write(f'[db] {user} 스냅샷 업로드: {length} bytes\n')
+        self.reply_json(200, {'ok': True, 'size': length})
 
     def handle_proxy(self, method):
         path = self.path.split('?')[0]

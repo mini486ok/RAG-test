@@ -205,6 +205,21 @@
           <p class="db-built-at" id="gBuiltAt"></p>
         </div>
       </div>
+      <h3 class="section-title transfer-title"><span class="title-tick"></span>DB 이동 · 공유 <small>EXPORT / IMPORT</small></h3>
+      <div class="transfer-card">
+        <div class="transfer-row">
+          <button class="btn-ghost" id="btnExportDb">💾 파일로 내보내기</button>
+          <button class="btn-ghost" id="btnImportDb">📂 파일 가져오기</button>
+          <input type="file" id="dbFileInput" accept=".gz,.json" hidden>
+        </div>
+        <div class="transfer-row" id="serverSyncRow" hidden>
+          <button class="btn-ghost" id="btnDbUpload">☁ 서버에 올리기</button>
+          <button class="btn-ghost" id="btnDbDownload">⬇ 서버에서 받기</button>
+          <span class="transfer-info" id="dbSnapshotInfo"></span>
+        </div>
+        <p class="param-note">문서·Vector·Graph DB 전체를 하나의 파일로 옮깁니다. 다른 PC에서 <b>가져오기(또는 서버에서 받기)</b>를 실행하면 기 구축한 DB를 그대로 사용할 수 있습니다. 가져오기는 현재 브라우저의 DB를 완전히 대체합니다.</p>
+      </div>
+
       <button class="btn-danger btn-sm" id="btnClearAll">전체 데이터 초기화</button>
     </div>
 

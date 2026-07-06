@@ -2,3 +2,5 @@
 accounts.json
 usage.json
 tunnel.log
+db_snapshot.bin
+db_snapshot.bin.tmp

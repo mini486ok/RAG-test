@@ -11,6 +11,7 @@ import { GraphStore } from './graphstore.js';
 import { VectorViz } from './viz-vector.js';
 import { GraphViz } from './viz-graph.js';
 import { emptyRunMetrics, computeTps, renderCharts, renderHistory, saveHistoryEntry, clearHistory } from './metrics.js';
+import { exportSnapshot, importSnapshot } from './transfer.js';
 import { $, $$, toast, makeStreamRenderer, fmtMs, fmtNum, fmtBytes, escapeHtml, uid } from './ui.js';
 
 // ── 전역 상태 ──────────────────────────────
@@ -377,6 +378,7 @@ async function connectRaw() {
   $('#connText').textContent = `${isRemoteServer() ? '원격 서버' : 'Ollama'} 연결됨 · 모델 ${models.length}개${who}`;
   populateModelSelects();
   $('#drawerInfo').textContent = `서버: ${settings.ollamaUrl}\n모델 ${models.length}개 감지${authUser ? `\n로그인: ${authUser}` : ''}`;
+  probeDbServer(); // 프록시 연결 시 서버 스냅샷 동기화 UI 활성화 (Ollama 직결이면 자동 숨김)
 }
 
 async function connect() {
@@ -1004,6 +1006,7 @@ function initBuildTab() {
     if (await buildVector(true)) await buildGraph(true);
   });
   $('#btnCancelBuild').addEventListener('click', () => buildAbort?.abort());
+  initTransfer();
 }
 
 function bindVectorParams() {
@@ -1371,6 +1374,118 @@ async function buildGraph(full = false) {
     refreshDbStats();
     setIdleEmptyStates();
   }
+}
+
+// ── DB 이동 · 공유 (파일 + 서버 스냅샷) ──────────────────────────────
+async function reloadAllFromDb() {
+  await Promise.all([loadDocs(), vectorStore.load(), graphStore.load()]);
+  refreshDocList();
+  refreshDbStats();
+  setIdleEmptyStates();
+  vizVectorDirty = true;
+  vizGraphDirty = true;
+}
+
+async function applyImportedSnapshot(buf) {
+  if (building || running) {
+    toast('구축·질의 실행 중에는 DB를 가져올 수 없습니다.', 'warn');
+    return;
+  }
+  if (!confirm('현재 브라우저의 문서·Vector·Graph DB를 가져온 스냅샷으로 완전히 대체합니다. 계속할까요?')) return;
+  try {
+    toast('DB 복원 중…', 'info', 2500);
+    const r = await importSnapshot(buf);
+    await reloadAllFromDb();
+    toast(`복원 완료: 문서 ${r.docs} · 청크 ${fmtNum(r.chunks)} · 노드 ${fmtNum(r.nodes)} · 관계 ${fmtNum(r.edges)}`, 'ok', 6000);
+    // 스냅샷의 임베딩 모델과 현재 설정을 일치시켜 검색 정합성 확보
+    if (r.embedModel && r.embedModel !== settings.embedModel) {
+      if (models.some((m) => m.name === r.embedModel)) {
+        settings.embedModel = r.embedModel;
+        $('#embedModel').value = r.embedModel;
+        saveSettings();
+        toast(`임베딩 모델을 스냅샷 기준(${r.embedModel})으로 변경했습니다.`, 'info', 5000);
+      } else {
+        toast(`⚠ 이 스냅샷은 ${r.embedModel} 임베딩으로 구축되었습니다. 해당 모델이 없으면 검색이 실패하니 ollama pull로 설치하세요.`, 'warn', 9000);
+      }
+    }
+  } catch (e) {
+    toast(`가져오기 실패: ${e.message}`, 'err', 7000);
+    console.error(e);
+  }
+}
+
+async function probeDbServer() {
+  // 인증 프록시(/db 지원 서버)에 연결된 경우에만 서버 동기화 UI 노출
+  try {
+    const res = await fetch(`${client.baseUrl}/db/info`, { headers: client.headers() });
+    if (!res.ok) throw new Error();
+    const info = await res.json();
+    $('#serverSyncRow').hidden = false;
+    $('#dbSnapshotInfo').textContent = info.exists
+      ? `서버 스냅샷: ${fmtBytes(info.size)} · ${new Date(info.updated_at * 1000).toLocaleString('ko-KR')}`
+      : '서버에 저장된 스냅샷 없음';
+    $('#btnDbDownload').disabled = !info.exists;
+  } catch {
+    $('#serverSyncRow').hidden = true;
+  }
+}
+
+function initTransfer() {
+  $('#btnExportDb').addEventListener('click', async () => {
+    if (building) {
+      toast('구축 중에는 내보낼 수 없습니다.', 'warn');
+      return;
+    }
+    try {
+      const { blob, stats } = await exportSnapshot();
+      const d = new Date();
+      const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `railbrain-db-${stamp}.json${stats.compressed ? '.gz' : ''}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast(`내보내기 완료: ${fmtBytes(stats.bytes)} (문서 ${stats.docs} · 청크 ${fmtNum(stats.chunks)} · 노드 ${fmtNum(stats.nodes)})`, 'ok', 6000);
+    } catch (e) {
+      toast(e.message, 'err', 6000);
+    }
+  });
+
+  $('#btnImportDb').addEventListener('click', () => $('#dbFileInput').click());
+  $('#dbFileInput').addEventListener('change', async () => {
+    const f = $('#dbFileInput').files[0];
+    $('#dbFileInput').value = '';
+    if (!f) return;
+    await applyImportedSnapshot(await f.arrayBuffer());
+  });
+
+  $('#btnDbUpload').addEventListener('click', async () => {
+    if (building) {
+      toast('구축 중에는 업로드할 수 없습니다.', 'warn');
+      return;
+    }
+    try {
+      const { blob, stats } = await exportSnapshot();
+      toast(`서버로 업로드 중… (${fmtBytes(stats.bytes)})`, 'info', 3000);
+      const res = await fetch(`${client.baseUrl}/db`, { method: 'PUT', headers: client.headers(), body: blob });
+      if (!res.ok) throw await client.httpError(res, '업로드 실패');
+      toast('서버에 DB 스냅샷을 저장했습니다. 다른 PC에서 [서버에서 받기]로 즉시 사용할 수 있습니다.', 'ok', 7000);
+      probeDbServer();
+    } catch (e) {
+      toast(`서버 업로드 실패: ${e.message}`, 'err', 7000);
+    }
+  });
+
+  $('#btnDbDownload').addEventListener('click', async () => {
+    try {
+      toast('서버에서 스냅샷 받는 중…', 'info', 2500);
+      const res = await fetch(`${client.baseUrl}/db`, { headers: client.headers() });
+      if (!res.ok) throw await client.httpError(res, '다운로드 실패');
+      await applyImportedSnapshot(await res.arrayBuffer());
+    } catch (e) {
+      toast(`서버에서 받기 실패: ${e.message}`, 'err', 7000);
+    }
+  });
 }
 
 function refreshDbStats() {

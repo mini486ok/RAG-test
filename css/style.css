@@ -805,6 +805,18 @@ body[data-theme="light"] .signal-box { background: rgba(16, 34, 70, 0.08); }
 .db-stats span { font-size: 0.66rem; color: var(--ink-3); }
 .db-built-at { font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink-3); margin-top: 6px; }
 
+/* DB 이동·공유 */
+.transfer-title { margin-top: 22px; }
+.transfer-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 13px 15px;
+}
+.transfer-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.transfer-row + .transfer-row { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--hairline-2); }
+.transfer-info { font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3); }
+
 /* 파라미터 카드 */
 .param-card {
   background: var(--surface);
